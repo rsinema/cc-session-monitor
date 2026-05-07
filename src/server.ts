@@ -8,6 +8,7 @@ import { ingestFile } from "./ingest.ts";
 import { startWatcher } from "./watcher.ts";
 import { subscribeBus, publish } from "./bus.ts";
 import { handleHookEvent } from "./hooks.ts";
+import { rebuildAwaitingFromMessages, clearStaleAwaiting } from "./repair.ts";
 import { fileURLToPath } from "node:url";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -188,6 +189,21 @@ function catchup(rootDir: string) {
 }
 
 catchup(PROJECTS_DIR);
+
+// Reconcile awaiting state with the actual message stream:
+//  - flip on for sessions with an open blocking tool_use we haven't tracked yet
+//  - flip off for sessions whose last message is already a user reply
+const flipped = rebuildAwaitingFromMessages();
+const cleared = clearStaleAwaiting();
+if (flipped.size > 0 || cleared.size > 0) {
+  console.log(
+    `[repair] awaiting state: +${flipped.size} flipped on, -${cleared.size} cleared as stale`
+  );
+  for (const id of new Set([...flipped, ...cleared])) {
+    const session = stmts.getSessionById.get(id);
+    if (session) publish({ type: "session_updated", session });
+  }
+}
 
 startWatcher(PROJECTS_DIR, (filePath) => {
   try {

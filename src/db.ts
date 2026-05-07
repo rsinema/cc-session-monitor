@@ -13,6 +13,16 @@ db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 db.exec("PRAGMA synchronous = NORMAL");
 
+// One-shot migrations. SQLite has no IF NOT EXISTS for ALTER, so swallow the duplicate-column error.
+function tryExec(sql: string) {
+  try {
+    db.exec(sql);
+  } catch (err) {
+    const msg = String(err);
+    if (!msg.includes("duplicate column")) throw err;
+  }
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -52,6 +62,9 @@ db.exec(`
     content_rowid='rowid'
   );
 `);
+
+// Post-CREATE migrations.
+tryExec(`ALTER TABLE sessions ADD COLUMN awaiting_tool_id TEXT`);
 
 // FTS sync triggers (idempotent — safe to re-run).
 db.exec(`
@@ -93,7 +106,25 @@ export const stmts = {
   `),
 
   setAwaitingInput: db.prepare(`UPDATE sessions SET awaiting_input = ? WHERE id = ?`),
-  clearAwaitingInputForSession: db.prepare(`UPDATE sessions SET awaiting_input = 0 WHERE id = ?`),
+  clearAwaitingInputForSession: db.prepare(
+    `UPDATE sessions SET awaiting_input = 0, awaiting_tool_id = NULL WHERE id = ?`
+  ),
+
+  /** Set awaiting state because a blocking tool_use (AskUserQuestion / ExitPlanMode) was just ingested. */
+  setAwaitingByToolUse: db.prepare(
+    `UPDATE sessions SET awaiting_input = 1, awaiting_tool_id = ? WHERE id = ?`
+  ),
+
+  /**
+   * Clear awaiting state on incoming tool_result. Matches whether the recorded
+   * tool id matches the tool_use_id (precise case) OR awaiting was set by a
+   * Notification hook with NULL tool id (covers permission prompts where no
+   * Stop hook follows).
+   */
+  clearAwaitingByToolResult: db.prepare(
+    `UPDATE sessions SET awaiting_input = 0, awaiting_tool_id = NULL
+     WHERE id = ? AND (awaiting_tool_id = ? OR awaiting_tool_id IS NULL)`
+  ),
 
   getSessionById: db.prepare(`SELECT * FROM sessions WHERE id = ?`),
 

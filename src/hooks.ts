@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
 import { stmts } from "./db.ts";
 import { publish } from "./bus.ts";
+import { macNotify } from "./notify.ts";
 
 /**
  * Handle a Claude Code hook payload (POSTed by ~/.claude-monitor/hooks/notify.sh).
@@ -47,14 +47,3 @@ export function handleHookEvent(body: any): { ok: boolean; handled: string | nul
   return { ok: true, handled: null };
 }
 
-function macNotify(title: string, body: string) {
-  const safeTitle = String(title).slice(0, 200).replace(/"/g, '\\"');
-  const safeBody = String(body).slice(0, 400).replace(/"/g, '\\"');
-  const script = `display notification "${safeBody}" with title "${safeTitle}" sound name "Glass"`;
-  try {
-    const child = spawn("osascript", ["-e", script], { stdio: "ignore", detached: true });
-    child.unref();
-  } catch {
-    // Best effort — never throw out of a hook handler.
-  }
-}
