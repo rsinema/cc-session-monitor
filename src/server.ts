@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { existsSync, statSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { db, stmts } from "./db.ts";
@@ -150,6 +150,45 @@ app.get("*", async (c) => {
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────
+// Catchup pass: ingestFile is idempotent on line offsets, so this is cheap and
+// closes the gap between the watcher's `ignoreInitial: true` and reality
+// (sessions that were already mid-flight when we started).
+function catchup(rootDir: string) {
+  const stack = [rootDir];
+  let count = 0;
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const full = join(dir, name);
+      let s;
+      try {
+        s = statSync(full);
+      } catch {
+        continue;
+      }
+      if (s.isDirectory()) {
+        stack.push(full);
+      } else if (s.isFile() && full.endsWith(".jsonl")) {
+        try {
+          const { newEvents, touchedSessions } = ingestFile(full);
+          if (newEvents.length || touchedSessions.size) count++;
+        } catch (err) {
+          console.error("[catchup] failed", full, err);
+        }
+      }
+    }
+  }
+  if (count > 0) console.log(`[catchup] ingested updates for ${count} files`);
+}
+
+catchup(PROJECTS_DIR);
+
 startWatcher(PROJECTS_DIR, (filePath) => {
   try {
     const { newEvents, touchedSessions } = ingestFile(filePath);

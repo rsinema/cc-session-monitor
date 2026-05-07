@@ -72,11 +72,11 @@ export const stmts = {
     INSERT INTO sessions (id, project_path, project_name, started_at, last_activity, message_count, file_path, awaiting_input)
     VALUES (?, ?, ?, ?, ?, 0, ?, 0)
     ON CONFLICT(id) DO UPDATE SET
-      project_path = excluded.project_path,
-      project_name = excluded.project_name,
       last_activity = MAX(sessions.last_activity, excluded.last_activity),
       started_at = MIN(sessions.started_at, excluded.started_at),
       file_path = excluded.file_path
+    -- project_path / project_name are NOT updated on conflict so a subagent
+    -- file (whose cwd is a worktree) can't overwrite the main session's path.
   `),
 
   insertMessage: db.prepare(`
