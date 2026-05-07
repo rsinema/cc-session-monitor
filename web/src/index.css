@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+/* Subtle pulse for sessions awaiting input */
+@keyframes awaiting-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.6); }
+  50%      { box-shadow: 0 0 0 6px rgba(250, 204, 21, 0); }
+}
+.awaiting-pulse { animation: awaiting-pulse 1.6s ease-in-out infinite; }
+
+mark { background: rgba(250, 204, 21, 0.35); color: inherit; padding: 0 2px; border-radius: 2px; }
