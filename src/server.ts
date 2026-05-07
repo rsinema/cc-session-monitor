@@ -29,8 +29,24 @@ app.get("/api/sessions/:id", (c) => {
   const id = c.req.param("id");
   const session = stmts.getSessionById.get(id);
   if (!session) return c.json({ error: "not found" }, 404);
-  const messages = stmts.getMessagesBySession.all(id);
-  return c.json({ session, messages });
+
+  const limitParam = c.req.query("limit");
+  const total = (stmts.countMessagesInSession.get(id) as { c: number }).c;
+  const messages = limitParam
+    ? stmts.getLatestMessages.all(id, Math.min(Number(limitParam) || 10, 1000))
+    : stmts.getMessagesBySession.all(id);
+
+  return c.json({ session, messages, total });
+});
+
+/** Load earlier messages strictly before a given timestamp (cursor pagination). */
+app.get("/api/sessions/:id/messages", (c) => {
+  const id = c.req.param("id");
+  const beforeTs = Number(c.req.query("before_ts") ?? 0);
+  const limit = Math.min(Number(c.req.query("limit") ?? 50), 500);
+  if (!beforeTs) return c.json({ error: "before_ts required" }, 400);
+  const messages = stmts.getMessagesBefore.all(id, beforeTs, limit);
+  return c.json({ messages });
 });
 
 app.get("/api/search", (c) => {

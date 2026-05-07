@@ -98,9 +98,73 @@ function parseBlocks(m: Message): Block[] {
   return [{ kind: "text", text: m.text_preview ?? "" }];
 }
 
+const LONG_TEXT_CHARS = 1200;
+const LONG_TEXT_LINES = 25;
+
+function isLong(text: string): boolean {
+  if (text.length > LONG_TEXT_CHARS) return true;
+  let nl = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 && ++nl > LONG_TEXT_LINES) return true;
+  }
+  return false;
+}
+
+function CollapsibleText({
+  text,
+  className,
+  open,
+  onToggle,
+}: {
+  text: string;
+  className: string;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  if (!isLong(text)) {
+    return <pre className={className}>{text}</pre>;
+  }
+  const preview = open ? text : truncatePreview(text);
+  return (
+    <div>
+      <pre className={className}>{preview}</pre>
+      <button
+        onClick={onToggle}
+        className="mt-1 text-[11px] text-zinc-500 hover:text-zinc-300"
+      >
+        {open ? "collapse" : `show full message (${text.length.toLocaleString()} chars)`}
+      </button>
+    </div>
+  );
+}
+
+function truncatePreview(text: string): string {
+  // Cap at LONG_TEXT_LINES lines OR LONG_TEXT_CHARS chars, whichever comes first.
+  let lineCount = 0;
+  let cutAt = -1;
+  for (let i = 0; i < text.length && i < LONG_TEXT_CHARS; i++) {
+    if (text.charCodeAt(i) === 10) {
+      lineCount++;
+      if (lineCount === LONG_TEXT_LINES) {
+        cutAt = i;
+        break;
+      }
+    }
+  }
+  if (cutAt === -1) cutAt = Math.min(LONG_TEXT_CHARS, text.length);
+  return text.slice(0, cutAt) + "\n…";
+}
+
 function BlockView({ block, open, onToggle }: { block: Block; open: boolean; onToggle: () => void }) {
   if (block.kind === "text") {
-    return <pre className="whitespace-pre-wrap break-words text-sm text-zinc-200 font-sans">{block.text}</pre>;
+    return (
+      <CollapsibleText
+        text={block.text}
+        className="whitespace-pre-wrap break-words text-sm text-zinc-200 font-sans"
+        open={open}
+        onToggle={onToggle}
+      />
+    );
   }
   if (block.kind === "thinking") {
     return (

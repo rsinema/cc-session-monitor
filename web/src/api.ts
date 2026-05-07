@@ -7,6 +7,11 @@ export interface Session {
   message_count: number;
   file_path: string;
   awaiting_input: number;
+  // Joined from latest message; may be null for empty sessions.
+  latest_role?: string | null;
+  latest_type?: string | null;
+  latest_preview?: string | null;
+  latest_ts?: number | null;
 }
 
 export interface Message {
@@ -39,14 +44,33 @@ async function j<T>(res: Response): Promise<T> {
 
 export const api = {
   listSessions: async (): Promise<Session[]> =>
-    (await j<{ sessions: Session[] }>(await fetchSafe(`/api/sessions?limit=200`))).sessions,
-  getSession: async (id: string): Promise<{ session: Session; messages: Message[] }> =>
-    j(await fetchSafe(`/api/sessions/${id}`)),
+    (await j<{ sessions: Session[] }>(await fetch(`/api/sessions?limit=200`))).sessions,
+
+  /**
+   * Load a session. With `limit` set, returns only the most recent N messages plus the total count
+   * so the UI can show "N of M" and offer a "load earlier" expander.
+   */
+  getSession: async (
+    id: string,
+    opts?: { limit?: number }
+  ): Promise<{ session: Session; messages: Message[]; total?: number }> => {
+    const qs = opts?.limit ? `?limit=${opts.limit}` : "";
+    return j(await fetch(`/api/sessions/${id}${qs}`));
+  },
+
+  /** Cursor-paginated history: messages strictly before `before_ts`, returned in chronological order. */
+  getEarlierMessages: async (
+    id: string,
+    beforeTs: number,
+    limit = 50
+  ): Promise<Message[]> =>
+    (
+      await j<{ messages: Message[] }>(
+        await fetch(`/api/sessions/${id}/messages?before_ts=${beforeTs}&limit=${limit}`)
+      )
+    ).messages,
+
   search: async (q: string): Promise<SearchResult[]> =>
-    (await j<{ results: SearchResult[] }>(await fetchSafe(`/api/search?q=${encodeURIComponent(q)}`)))
+    (await j<{ results: SearchResult[] }>(await fetch(`/api/search?q=${encodeURIComponent(q)}`)))
       .results,
 };
-
-async function fetchSafe(url: string): Promise<Response> {
-  return fetch(url, { credentials: "same-origin" });
-}

@@ -98,14 +98,51 @@ export const stmts = {
   getSessionById: db.prepare(`SELECT * FROM sessions WHERE id = ?`),
 
   listSessions: db.prepare(`
-    SELECT * FROM sessions
-    ORDER BY last_activity DESC
+    SELECT
+      s.*,
+      latest.role         AS latest_role,
+      latest.type         AS latest_type,
+      latest.text_preview AS latest_preview,
+      latest.timestamp    AS latest_ts
+    FROM sessions s
+    LEFT JOIN (
+      SELECT m.session_id, m.role, m.type, m.text_preview, m.timestamp
+      FROM messages m
+      JOIN (
+        SELECT session_id, MAX(timestamp) AS max_ts
+        FROM messages
+        GROUP BY session_id
+      ) g ON g.session_id = m.session_id AND g.max_ts = m.timestamp
+    ) latest ON latest.session_id = s.id
+    ORDER BY s.last_activity DESC
     LIMIT ? OFFSET ?
   `),
 
   getMessagesBySession: db.prepare(`
     SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC, line_number ASC
   `),
+
+  /** Most recent N messages for a session, returned in chronological order. */
+  getLatestMessages: db.prepare(`
+    SELECT * FROM (
+      SELECT * FROM messages
+      WHERE session_id = ?
+      ORDER BY timestamp DESC, line_number DESC
+      LIMIT ?
+    ) ORDER BY timestamp ASC, line_number ASC
+  `),
+
+  /** Messages strictly before a given timestamp, most-recent first; flip in JS. */
+  getMessagesBefore: db.prepare(`
+    SELECT * FROM (
+      SELECT * FROM messages
+      WHERE session_id = ? AND timestamp < ?
+      ORDER BY timestamp DESC, line_number DESC
+      LIMIT ?
+    ) ORDER BY timestamp ASC, line_number ASC
+  `),
+
+  countMessagesInSession: db.prepare(`SELECT COUNT(*) AS c FROM messages WHERE session_id = ?`),
 
   searchMessages: db.prepare(`
     SELECT
