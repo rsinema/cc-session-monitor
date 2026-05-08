@@ -1,0 +1,34 @@
+# Drop this file anywhere on your machine and run:
+#
+#   docker compose up -d
+#   → open http://localhost:3737
+#
+# Compose pulls the image from Docker Hub on first run, bind-mounts your
+# host's Claude Code session files into the container, and listens on 3737.
+# Hooks fired by Claude Code on the host POST to localhost:3737 and map
+# straight into the container — no extra wiring beyond the standard hook
+# config in ~/.claude/settings.json.
+#
+# Power users: set MONITOR_IMAGE in your shell to pin a specific tag or use
+# your own fork, e.g.
+#   MONITOR_IMAGE=rsinema/claude-session-monitor:abc1234 docker compose up -d
+#
+# Linux note: bind-mounted files are owned by your host UID. If the container
+# can't write ~/.claude-monitor, run:
+#   UID=$(id -u) GID=$(id -g) docker compose up -d
+# and uncomment the `user:` line below. macOS hosts handle UID remapping
+# automatically.
+
+services:
+  monitor:
+    image: ${MONITOR_IMAGE:-rsinema/claude-session-monitor:latest}
+    container_name: claude-session-monitor
+    pull_policy: missing
+    ports:
+      - "3737:3737"
+    volumes:
+      - ${HOME}/.claude:/host/.claude:ro
+      - ${HOME}/.claude-monitor:/host/.claude-monitor
+    # user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
+    init: true

@@ -1,0 +1,14 @@
+node_modules
+web/dist
+.git
+.gitignore
+.DS_Store
+*.log
+.claude
+.vscode
+.idea
+src-v1
+TODO.txt
+README.md
+SCHEMA.md
+claude-session-monitor-plan.md
