@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { SessionList } from "./components/SessionList";
 import { Transcript } from "./components/Transcript";
-import { Dashboard } from "./components/Dashboard";
+import { Dashboard, isStaleAwaiting } from "./components/Dashboard";
 import { SearchBar } from "./components/SearchBar";
 import { SearchResults } from "./components/SearchResults";
 import { useLiveUpdates } from "./hooks/useLiveUpdates";
@@ -50,7 +50,9 @@ export default function App() {
     setQuery("");
   }
 
-  const awaitingCount = sessions.filter((s) => s.awaiting_input).length;
+  const awaitingCount = sessions.filter(
+    (s) => s.state === "AWAITING_USER" && !isStaleAwaiting(s)
+  ).length;
   const selectedId = view.kind === "session" ? view.id : null;
 
   return (

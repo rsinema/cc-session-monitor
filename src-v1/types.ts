@@ -27,6 +27,18 @@ export interface ParsedEvent {
   isToolUse?: boolean;
   /** Tool name, when type === "tool_use". */
   toolName?: string;
+  /**
+   * Anthropic stop_reason from assistant messages: "end_turn" when the turn
+   * is fully complete (user is now needed) or "tool_use" when more activity
+   * follows. Only present on assistant rows.
+   */
+  stopReason?: string | null;
+  /**
+   * True when this row was emitted by a subagent (Task tool). Subagent turns
+   * complete independently of the parent session, so their end_turn must not
+   * be used to flip the parent's awaiting state.
+   */
+  isSidechain?: boolean;
 }
 
 export interface SessionRow {

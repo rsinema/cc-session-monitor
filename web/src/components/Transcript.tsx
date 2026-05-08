@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api, type Message } from "../api";
-import { MessageView } from "./Message";
+import { api, type SessionEvent, SUB_STATE_LABEL } from "../api";
+import { EventView } from "./Message";
 import { relativeTime } from "../lib/format";
 
 interface Props {
@@ -9,8 +9,8 @@ interface Props {
   onBack?: () => void;
 }
 
-const INITIAL_LIMIT = 10;
-const PAGE_SIZE = 30;
+const INITIAL_LIMIT = 30;
+const PAGE_SIZE = 50;
 
 export function Transcript({ sessionId, onBack }: Props) {
   const { data, isLoading, error } = useQuery({
@@ -18,42 +18,39 @@ export function Transcript({ sessionId, onBack }: Props) {
     queryFn: () => api.getSession(sessionId, { limit: INITIAL_LIMIT }),
   });
 
-  const [earlier, setEarlier] = useState<Message[]>([]);
+  const [earlier, setEarlier] = useState<SessionEvent[]>([]);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
-
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastCount = useRef(0);
 
-  // Reset earlier-window when switching sessions.
   useEffect(() => {
     setEarlier([]);
     lastCount.current = 0;
   }, [sessionId]);
 
   useEffect(() => {
-    const count = data?.messages.length ?? 0;
+    const count = data?.events.length ?? 0;
     if (count > lastCount.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
     lastCount.current = count;
-  }, [data?.messages.length]);
+  }, [data?.events.length]);
 
   if (isLoading) return <div className="p-8 text-zinc-500">Loading…</div>;
   if (error) return <div className="p-8 text-red-400">Error: {String(error)}</div>;
   if (!data) return null;
 
-  const { session, messages, total = messages.length } = data;
-  const hasMoreEarlier = earlier.length + messages.length < total;
-  const earlierShown = earlier.length;
-  const remaining = Math.max(0, total - messages.length - earlierShown);
+  const { session, events, total } = data;
+  const hasMoreEarlier = earlier.length + events.length < total;
+  const remaining = Math.max(0, total - events.length - earlier.length);
 
   async function loadEarlier() {
     if (loadingEarlier) return;
-    const oldest = earlier[0]?.timestamp ?? messages[0]?.timestamp;
+    const oldest = earlier[0]?.ts ?? events[0]?.ts;
     if (!oldest) return;
     setLoadingEarlier(true);
     try {
-      const more = await api.getEarlierMessages(sessionId, oldest, PAGE_SIZE);
+      const more = await api.getEarlierEvents(sessionId, oldest, PAGE_SIZE);
       setEarlier((prev) => [...more, ...prev]);
     } finally {
       setLoadingEarlier(false);
@@ -74,20 +71,19 @@ export function Transcript({ sessionId, onBack }: Props) {
               </button>
             )}
             <div className="min-w-0">
-              <h2 className="text-lg font-medium truncate">
-                {session.project_name}
-                {session.awaiting_input ? (
-                  <span className="ml-2 text-[10px] uppercase tracking-wide text-yellow-400 font-semibold">
-                    awaiting
-                  </span>
-                ) : null}
+              <h2 className="text-lg font-medium truncate flex items-center gap-2">
+                {session.title?.trim() || session.project_name}
+                <StatePill session={session} />
               </h2>
-              <div className="text-xs text-zinc-500 truncate font-mono">{session.project_path}</div>
+              <div className="text-xs text-zinc-500 truncate font-mono">
+                {session.title?.trim() ? `${session.project_name} · ` : ""}
+                {session.project_path}
+              </div>
             </div>
           </div>
           <div className="text-xs text-zinc-500 text-right shrink-0">
-            <div>{total} messages</div>
-            <div>active {relativeTime(session.last_activity)}</div>
+            <div>{total} events</div>
+            <div>active {relativeTime(session.last_event_ts)}</div>
           </div>
         </div>
       </div>
@@ -100,23 +96,39 @@ export function Transcript({ sessionId, onBack }: Props) {
               disabled={loadingEarlier}
               className="text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded border border-zinc-800 hover:border-zinc-600 disabled:opacity-50"
             >
-              {loadingEarlier
-                ? "Loading…"
-                : `↑ Show earlier (${remaining} more)`}
+              {loadingEarlier ? "Loading…" : `↑ Show earlier (${remaining} more)`}
             </button>
           </div>
-        ) : total > messages.length + earlierShown ? null : earlierShown > 0 || messages.length < total ? (
+        ) : earlier.length > 0 || events.length > 0 ? (
           <div className="text-center text-[11px] text-zinc-600">— start of session —</div>
         ) : null}
 
-        {earlier.map((m) => (
-          <MessageView key={m.id} message={m} />
+        {earlier.map((e) => (
+          <EventView key={e.id} event={e} />
         ))}
-        {messages.map((m) => (
-          <MessageView key={m.id} message={m} />
+        {events.map((e) => (
+          <EventView key={e.id} event={e} />
         ))}
         <div ref={bottomRef} />
       </div>
     </div>
+  );
+}
+
+function StatePill({ session }: { session: { state: string; sub_state: string | null } }) {
+  const tone =
+    session.state === "AWAITING_USER"
+      ? "bg-yellow-500/20 text-yellow-300"
+      : session.state === "EXITED"
+      ? "bg-zinc-800 text-zinc-400"
+      : "bg-emerald-500/20 text-emerald-300";
+  const label =
+    session.sub_state && session.sub_state in SUB_STATE_LABEL
+      ? (SUB_STATE_LABEL as Record<string, string>)[session.sub_state]
+      : session.state.toLowerCase().replaceAll("_", " ");
+  return (
+    <span className={`text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded ${tone}`}>
+      {label}
+    </span>
   );
 }

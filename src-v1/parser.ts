@@ -128,6 +128,9 @@ export function parseLine(line: string): {
       : firstBlock?.type === "thinking"
       ? "thinking"
       : "text";
+    const stopReason =
+      typeof raw?.message?.stop_reason === "string" ? raw.message.stop_reason : null;
+    const isSidechain = raw?.isSidechain === true;
     return {
       event: {
         id: uuid,
@@ -141,6 +144,8 @@ export function parseLine(line: string): {
         projectPath,
         isToolUse,
         toolName,
+        stopReason,
+        isSidechain,
       },
       raw,
     };
@@ -154,15 +159,24 @@ export function extractSessionMetaFromRaw(raw: any): {
   sessionId: string | null;
   projectPath: string | null;
   timestamp: number | null;
+  /** AI-generated chat title — only present on `ai-title` envelope rows. */
+  aiTitle: string | null;
 } {
-  if (!raw || typeof raw !== "object") return { sessionId: null, projectPath: null, timestamp: null };
+  if (!raw || typeof raw !== "object") {
+    return { sessionId: null, projectPath: null, timestamp: null, aiTitle: null };
+  }
   const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : null;
   const projectPath = typeof raw.cwd === "string" ? raw.cwd : null;
   const tsStr = typeof raw.timestamp === "string" ? raw.timestamp : null;
   const timestamp = tsStr ? Date.parse(tsStr) : null;
+  const aiTitle =
+    raw.type === "ai-title" && typeof raw.aiTitle === "string" && raw.aiTitle.trim()
+      ? raw.aiTitle.trim()
+      : null;
   return {
     sessionId,
     projectPath,
     timestamp: timestamp != null && !Number.isNaN(timestamp) ? timestamp : null,
+    aiTitle,
   };
 }

@@ -1,162 +1,23 @@
-import { Hono } from "hono";
-import { stream } from "hono/streaming";
-import { existsSync, statSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import { db, stmts } from "./db.ts";
-import { ingestFile } from "./ingest.ts";
-import { startWatcher } from "./watcher.ts";
-import { subscribeBus, publish } from "./bus.ts";
-import { handleHookEvent } from "./hooks.ts";
-import { rebuildAwaitingFromMessages, clearStaleAwaiting } from "./repair.ts";
-import { fileURLToPath } from "node:url";
+import { readdirSync, statSync } from "node:fs";
+import { stmts, DB_FILE } from "./db.ts";
+import { ingestFile } from "./reader/ingest.ts";
+import { startWatcher } from "./reader/watcher.ts";
+import { recomputeAllStates } from "./state/project.ts";
+import { runMigrations } from "./migrations.ts";
+import { createApp, attachStaticFrontend } from "./server/api.ts";
+import { dispatch } from "./server/dispatch.ts";
 
-const PROJECTS_DIR = join(homedir(), ".claude", "projects");
+const PROJECTS_DIR =
+  process.env.CC_PROJECTS_DIR ?? join(homedir(), ".claude", "projects");
 const PORT = Number(process.env.PORT ?? 3737);
 
-const app = new Hono();
+console.log(`[claude-monitor v2] DB: ${DB_FILE}`);
 
-// ── API ────────────────────────────────────────────────────────────────
-app.get("/api/health", (c) => c.json({ ok: true }));
-
-app.get("/api/sessions", (c) => {
-  const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
-  const offset = Number(c.req.query("offset") ?? 0);
-  const rows = stmts.listSessions.all(limit, offset);
-  return c.json({ sessions: rows });
-});
-
-app.get("/api/sessions/:id", (c) => {
-  const id = c.req.param("id");
-  const session = stmts.getSessionById.get(id);
-  if (!session) return c.json({ error: "not found" }, 404);
-
-  const limitParam = c.req.query("limit");
-  const total = (stmts.countMessagesInSession.get(id) as { c: number }).c;
-  const messages = limitParam
-    ? stmts.getLatestMessages.all(id, Math.min(Number(limitParam) || 10, 1000))
-    : stmts.getMessagesBySession.all(id);
-
-  return c.json({ session, messages, total });
-});
-
-/** Load earlier messages strictly before a given timestamp (cursor pagination). */
-app.get("/api/sessions/:id/messages", (c) => {
-  const id = c.req.param("id");
-  const beforeTs = Number(c.req.query("before_ts") ?? 0);
-  const limit = Math.min(Number(c.req.query("limit") ?? 50), 500);
-  if (!beforeTs) return c.json({ error: "before_ts required" }, 400);
-  const messages = stmts.getMessagesBefore.all(id, beforeTs, limit);
-  return c.json({ messages });
-});
-
-app.get("/api/search", (c) => {
-  const q = (c.req.query("q") ?? "").trim();
-  if (!q) return c.json({ results: [] });
-  const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
-  // FTS5 syntax: quote untrusted input to prevent operator misuse.
-  const escaped = `"${q.replaceAll('"', '""')}"`;
-  let results: unknown[] = [];
-  try {
-    results = stmts.searchMessages.all(escaped, limit);
-  } catch (err) {
-    return c.json({ error: String(err) }, 400);
-  }
-  return c.json({ results });
-});
-
-// ── Hook callback ──────────────────────────────────────────────────────
-app.post("/api/hook/notify", async (c) => {
-  let body: any = null;
-  try {
-    body = await c.req.json();
-  } catch {
-    body = null;
-  }
-  const result = handleHookEvent(body);
-  return c.json(result);
-});
-
-// ── SSE live stream ────────────────────────────────────────────────────
-app.get("/api/stream", (c) => {
-  return stream(c, async (s) => {
-    s.onAbort(() => {
-      unsubscribe?.();
-    });
-    // Tell Hono to keep the connection open as SSE.
-    c.header("Content-Type", "text/event-stream");
-    c.header("Cache-Control", "no-cache, no-transform");
-    c.header("Connection", "keep-alive");
-    c.header("X-Accel-Buffering", "no");
-
-    let unsubscribe: (() => void) | null = null;
-    await s.writeln(": connected");
-
-    unsubscribe = subscribeBus((evt) => {
-      const payload = `event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`;
-      s.write(payload).catch(() => {
-        unsubscribe?.();
-      });
-    });
-
-    // Heartbeat every 25s so proxies don't drop us.
-    const interval = setInterval(() => {
-      s.writeln(": heartbeat").catch(() => clearInterval(interval));
-    }, 25_000);
-
-    // Hold the stream open.
-    await new Promise<void>((resolve) => {
-      s.onAbort(() => {
-        clearInterval(interval);
-        unsubscribe?.();
-        resolve();
-      });
-    });
-  });
-});
-
-// ── Static frontend ────────────────────────────────────────────────────
-const distDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "web", "dist");
-
-app.get("*", async (c) => {
-  const url = new URL(c.req.url);
-  let p = url.pathname;
-  if (p === "/" || !p.includes(".")) p = "/index.html";
-  const filePath = join(distDir, p);
-  if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-    // Fallback to index.html for client-side routes.
-    const indexPath = join(distDir, "index.html");
-    if (!existsSync(indexPath)) {
-      return c.text(
-        "Frontend not built yet. Run `bun run build` or `bun run dev` (which starts Vite).",
-        404
-      );
-    }
-    return c.body(readFileSync(indexPath), 200, { "Content-Type": "text/html" });
-  }
-  const ext = p.slice(p.lastIndexOf("."));
-  const ct =
-    ext === ".html"
-      ? "text/html"
-      : ext === ".js"
-      ? "text/javascript"
-      : ext === ".css"
-      ? "text/css"
-      : ext === ".svg"
-      ? "image/svg+xml"
-      : ext === ".json"
-      ? "application/json"
-      : "application/octet-stream";
-  return c.body(readFileSync(filePath), 200, { "Content-Type": ct });
-});
-
-// ── Boot ───────────────────────────────────────────────────────────────
-// Catchup pass: ingestFile is idempotent on line offsets, so this is cheap and
-// closes the gap between the watcher's `ignoreInitial: true` and reality
-// (sessions that were already mid-flight when we started).
-function catchup(rootDir: string) {
+// Boot catchup: walk every JSONL once on startup. Idempotent via byte offsets.
+function walkJsonl(rootDir: string, onFile: (path: string) => void) {
   const stack = [rootDir];
-  let count = 0;
   while (stack.length) {
     const dir = stack.pop()!;
     let entries: string[];
@@ -173,58 +34,78 @@ function catchup(rootDir: string) {
       } catch {
         continue;
       }
-      if (s.isDirectory()) {
-        stack.push(full);
-      } else if (s.isFile() && full.endsWith(".jsonl")) {
+      if (s.isDirectory()) stack.push(full);
+      else if (s.isFile() && full.endsWith(".jsonl")) {
         try {
-          const { newEvents, touchedSessions } = ingestFile(full);
-          if (newEvents.length || touchedSessions.size) count++;
+          onFile(full);
         } catch (err) {
-          console.error("[catchup] failed", full, err);
+          console.error("[boot] failed", full, err);
         }
       }
     }
   }
-  if (count > 0) console.log(`[catchup] ingested updates for ${count} files`);
 }
 
-catchup(PROJECTS_DIR);
-
-// Reconcile awaiting state with the actual message stream:
-//  - flip on for sessions with an open blocking tool_use we haven't tracked yet
-//  - flip off for sessions whose last message is already a user reply
-const flipped = rebuildAwaitingFromMessages();
-const cleared = clearStaleAwaiting();
-if (flipped.size > 0 || cleared.size > 0) {
-  console.log(
-    `[repair] awaiting state: +${flipped.size} flipped on, -${cleared.size} cleared as stale`
-  );
-  for (const id of new Set([...flipped, ...cleared])) {
-    const session = stmts.getSessionById.get(id);
-    if (session) publish({ type: "session_updated", session });
-  }
+const bootStart = Date.now();
+let bootEvents = 0;
+walkJsonl(PROJECTS_DIR, (filePath) => {
+  const r = ingestFile(filePath);
+  bootEvents += r.newEvents.length;
+});
+for (const m of runMigrations()) {
+  if (m.ran) console.log(`[migration] ${m.key}: ${m.details ?? "done"}`);
 }
+const projected = recomputeAllStates();
+console.log(
+  `[boot] ingested ${bootEvents} new events; projected ${projected} sessions in ${
+    Date.now() - bootStart
+  }ms`
+);
 
-startWatcher(PROJECTS_DIR, (filePath) => {
+function ingestAndDispatch(filePath: string) {
   try {
-    const { newEvents, touchedSessions } = ingestFile(filePath);
-    for (const id of touchedSessions) {
-      const session = stmts.getSessionById.get(id);
-      if (session) publish({ type: "session_updated", session });
-    }
-    for (const evt of newEvents) {
-      publish({ type: "message", sessionId: evt.sessionId, message: evt });
+    const r = ingestFile(filePath);
+    if (r.newEvents.length || r.touchedSessions.size) {
+      dispatch(r);
     }
   } catch (err) {
-    console.error("ingest error:", err);
+    console.error("[ingest] failed:", filePath, err);
   }
-});
+}
 
-console.log(`[claude-monitor] listening on http://localhost:${PORT}`);
+// Live watcher (chokidar). Primary path on macOS via fsevents.
+startWatcher(PROJECTS_DIR, ingestAndDispatch);
+
+// Mtime-based safety net. fsevents drops change events under load and chokidar
+// has no way to recover them. Every SWEEP_INTERVAL_MS we re-stat every JSONL
+// and re-ingest any file whose mtime advanced past what we last saw. The walk
+// is stat-only when nothing changed (no reads), so the steady-state cost is
+// trivial. ingestFile is byte-offset idempotent, so a stat-walk that races
+// the chokidar callback is a no-op.
+const SWEEP_INTERVAL_MS = 2_000;
+const lastMtime = new Map<string, number>();
+setInterval(() => {
+  walkJsonl(PROJECTS_DIR, (filePath) => {
+    let s;
+    try {
+      s = statSync(filePath);
+    } catch {
+      return;
+    }
+    const prev = lastMtime.get(filePath);
+    if (prev !== undefined && prev >= s.mtimeMs) return;
+    lastMtime.set(filePath, s.mtimeMs);
+    ingestAndDispatch(filePath);
+  });
+}, SWEEP_INTERVAL_MS).unref();
+
+const app = createApp();
+attachStaticFrontend(app);
+
+console.log(`[claude-monitor v2] listening on http://localhost:${PORT}`);
 
 export default {
   port: PORT,
   fetch: app.fetch,
-  // Keep SSE connections open longer than the default.
   idleTimeout: 240,
 };

@@ -1,37 +1,82 @@
+export type SessionState = "WORKING" | "AWAITING_USER" | "EXITED";
+export type SessionSubState =
+  | "tool_in_flight"
+  | "streaming"
+  | "subagent_running"
+  | "permission_prompt"
+  | "plan_approval"
+  | "question"
+  | "turn_complete"
+  | null;
+
+export type EventKind =
+  | "user_text"
+  | "user_tool_result"
+  | "assistant_text"
+  | "assistant_thinking"
+  | "assistant_tool_use"
+  | "exit"
+  | "system_meta"
+  | "permission_mode"
+  | "ai_title"
+  | "hook_notification"
+  | "hook_stop"
+  | "hook_subagent_stop";
+
 export interface Session {
   id: string;
   project_path: string;
   project_name: string;
-  started_at: number;
-  last_activity: number;
-  message_count: number;
+  title: string | null;
   file_path: string;
-  awaiting_input: number;
-  // Joined from latest message; may be null for empty sessions.
-  latest_role?: string | null;
-  latest_type?: string | null;
-  latest_preview?: string | null;
-  latest_ts?: number | null;
+  started_at: number;
+  last_event_ts: number;
+  state: SessionState;
+  sub_state: SessionSubState;
+  state_since: number;
+  current_tool_use_id: string | null;
+  exited_at_event: number | null;
+  hook_perm_prompt_at: number | null;
+  current_permission_mode: string | null;
+  tokens_in: number;
+  tokens_out: number;
+  tokens_cache_read: number;
+  tokens_cache_create: number;
 }
 
-export interface Message {
-  id: string;
-  session_id: string;
-  parent_id: string | null;
-  role: "user" | "assistant" | "system";
-  type: "text" | "tool_use" | "tool_result" | "thinking" | "system";
-  content: string;
+export interface SessionEvent {
+  id: number;
+  file_path: string;
+  byte_offset: number;
+  line_sha: string;
+  session_id: string | null;
+  kind: EventKind;
+  ts: number;
+  uuid: string | null;
+  parent_uuid: string | null;
+  tool_use_id: string | null;
+  tool_result_id: string | null;
+  is_sidechain: number;
+  stop_reason: string | null;
   text_preview: string | null;
-  timestamp: number;
-  line_number: number;
+  raw: string;
+}
+
+export interface OpenTool {
+  tool_use_id: string;
+  session_id: string;
+  name: string;
+  started_at: number;
+  completed_at: number | null;
+  is_error: number | null;
+  is_sidechain: number;
 }
 
 export interface SearchResult {
-  id: string;
+  id: number;
   session_id: string;
-  role: string;
-  type: string;
-  timestamp: number;
+  kind: EventKind;
+  ts: number;
   snippet: string;
   project_name: string;
   project_path: string;
@@ -46,31 +91,41 @@ export const api = {
   listSessions: async (): Promise<Session[]> =>
     (await j<{ sessions: Session[] }>(await fetch(`/api/sessions?limit=200`))).sessions,
 
-  /**
-   * Load a session. With `limit` set, returns only the most recent N messages plus the total count
-   * so the UI can show "N of M" and offer a "load earlier" expander.
-   */
   getSession: async (
     id: string,
     opts?: { limit?: number }
-  ): Promise<{ session: Session; messages: Message[]; total?: number }> => {
+  ): Promise<{
+    session: Session;
+    events: SessionEvent[];
+    total: number;
+    openTools: OpenTool[];
+  }> => {
     const qs = opts?.limit ? `?limit=${opts.limit}` : "";
     return j(await fetch(`/api/sessions/${id}${qs}`));
   },
 
-  /** Cursor-paginated history: messages strictly before `before_ts`, returned in chronological order. */
-  getEarlierMessages: async (
+  getEarlierEvents: async (
     id: string,
     beforeTs: number,
     limit = 50
-  ): Promise<Message[]> =>
+  ): Promise<SessionEvent[]> =>
     (
-      await j<{ messages: Message[] }>(
-        await fetch(`/api/sessions/${id}/messages?before_ts=${beforeTs}&limit=${limit}`)
+      await j<{ events: SessionEvent[] }>(
+        await fetch(`/api/sessions/${id}/events?before_ts=${beforeTs}&limit=${limit}`)
       )
-    ).messages,
+    ).events,
 
   search: async (q: string): Promise<SearchResult[]> =>
-    (await j<{ results: SearchResult[] }>(await fetch(`/api/search?q=${encodeURIComponent(q)}`)))
-      .results,
+    (await j<{ results: SearchResult[] }>(await fetch(`/api/search?q=${encodeURIComponent(q)}`))).results,
+};
+
+/** Tag for a sub_state, used by the UI. Null = no sub-state (EXITED, etc.). */
+export const SUB_STATE_LABEL: Record<NonNullable<SessionSubState>, string> = {
+  tool_in_flight: "tool running",
+  streaming: "thinking",
+  subagent_running: "subagent",
+  permission_prompt: "permission",
+  plan_approval: "plan approval",
+  question: "question",
+  turn_complete: "turn done",
 };

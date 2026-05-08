@@ -1,11 +1,15 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { Message, Session } from "../api";
+import type { Session, SessionEvent } from "../api";
 
 /**
- * Connect to /api/stream once and merge events into TanStack Query caches.
- * The transcript query key is `["session", id, limit]`; for live appends we touch every
- * cached limit-window for that session id.
+ * Connect once to /api/stream and merge SSE events into the TanStack Query
+ * caches. v2 vocabulary:
+ *   - event_appended  → push into transcript caches
+ *   - state_changed   → refresh sessions list (fields baked into session_meta)
+ *   - tool_started    → bump tool spinner cache
+ *   - tool_completed  → resolve tool spinner cache
+ *   - session_meta    → upsert session row
  */
 export function useLiveUpdates() {
   const qc = useQueryClient();
@@ -13,75 +17,73 @@ export function useLiveUpdates() {
   useEffect(() => {
     const es = new EventSource("/api/stream");
 
-    function onMessage(ev: MessageEvent<string>) {
+    function handle(ev: MessageEvent<string>) {
+      let evt: any;
       try {
-        const evt = JSON.parse(ev.data);
-
-        if (evt.type === "message") {
-          const m = evt.message as Message;
-          const row = normalizeMessage(m, evt.sessionId);
-
-          // Append to all cached transcript windows for this session.
-          const caches = qc.getQueryCache().findAll({ queryKey: ["session", evt.sessionId] });
-          for (const cache of caches) {
-            qc.setQueryData<{ session: Session; messages: Message[]; total?: number } | undefined>(
-              cache.queryKey,
-              (prev) => {
-                if (!prev) return prev;
-                if (prev.messages.some((x) => x.id === row.id)) return prev;
-                return {
-                  ...prev,
-                  messages: [...prev.messages, row],
-                  total: (prev.total ?? prev.messages.length) + 1,
-                };
-              }
-            );
-          }
-        } else if (evt.type === "session_updated") {
-          const s = evt.session as Session;
-          qc.setQueryData<Session[] | undefined>(["sessions"], (prev) => {
-            if (!prev) return prev;
-            const idx = prev.findIndex((x) => x.id === s.id);
-            if (idx === -1) return [s, ...prev];
-            // Preserve any latest_preview fields the new payload doesn't include.
-            const merged = { ...prev[idx], ...s } as Session;
-            const next = [...prev];
-            next[idx] = merged;
-            next.sort((a, b) => b.last_activity - a.last_activity);
-            return next;
-          });
-        } else if (evt.type === "awaiting_input") {
-          if (evt.awaitingInput && document.hidden && "Notification" in window) {
-            if (Notification.permission === "granted") {
-              new Notification("Claude Code", { body: "Awaiting your input" });
-            }
-          }
-        }
+        evt = JSON.parse(ev.data);
       } catch {
-        // ignore malformed
+        return;
       }
+
+      if (evt.type === "event_appended") {
+        const row = evt.event as SessionEvent;
+        const caches = qc
+          .getQueryCache()
+          .findAll({ queryKey: ["session", evt.sessionId] });
+        for (const cache of caches) {
+          qc.setQueryData<
+            | {
+                session: Session;
+                events: SessionEvent[];
+                total: number;
+                openTools: any[];
+              }
+            | undefined
+          >(cache.queryKey, (prev) => {
+            if (!prev) return prev;
+            if (prev.events.some((x) => x.id === row.id)) return prev;
+            return {
+              ...prev,
+              events: [...prev.events, row],
+              total: (prev.total ?? prev.events.length) + 1,
+            };
+          });
+        }
+      } else if (evt.type === "session_meta") {
+        const s = evt.session as Session;
+        qc.setQueryData<Session[] | undefined>(["sessions"], (prev) => {
+          if (!prev) return prev;
+          const idx = prev.findIndex((x) => x.id === s.id);
+          if (idx === -1) return [s, ...prev];
+          const next = [...prev];
+          next[idx] = { ...next[idx], ...s };
+          next.sort((a, b) => b.last_event_ts - a.last_event_ts);
+          return next;
+        });
+      } else if (evt.type === "state_changed") {
+        // Browser ping when entering AWAITING_USER and the page is hidden.
+        if (
+          evt.to?.state === "AWAITING_USER" &&
+          document.hidden &&
+          "Notification" in window &&
+          Notification.permission === "granted"
+        ) {
+          new Notification("Claude Code", {
+            body: `${evt.to.sub_state ?? "input needed"}`,
+          });
+        }
+      }
+      // tool_started / tool_completed are surfaced via session_meta refresh.
     }
 
-    es.addEventListener("message", onMessage);
-    es.addEventListener("session_updated", onMessage);
-    es.addEventListener("awaiting_input", onMessage);
+    es.addEventListener("event_appended", handle);
+    es.addEventListener("state_changed", handle);
+    es.addEventListener("tool_started", handle);
+    es.addEventListener("tool_completed", handle);
+    es.addEventListener("session_meta", handle);
 
     return () => {
       es.close();
     };
   }, [qc]);
-}
-
-function normalizeMessage(m: any, sessionId: string): Message {
-  return {
-    id: m.id,
-    session_id: m.sessionId ?? m.session_id ?? sessionId,
-    parent_id: m.parentId ?? m.parent_id ?? null,
-    role: m.role,
-    type: m.type,
-    content: m.content,
-    text_preview: m.textPreview ?? m.text_preview ?? null,
-    timestamp: m.timestamp,
-    line_number: m.line_number ?? 0,
-  };
 }

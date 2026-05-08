@@ -5,9 +5,13 @@ import { macNotify } from "./notify.ts";
 /**
  * Handle a Claude Code hook payload (POSTed by ~/.claude-monitor/hooks/notify.sh).
  *
- * We care about:
- *  - `Notification`  → set awaiting_input=1, fire macOS notification, broadcast.
- *  - `Stop`          → set awaiting_input=0, broadcast.
+ * Semantics:
+ *  - `Notification`  → in-turn alert (permission prompt, AskUserQuestion).
+ *                      awaiting=1, macNotify, broadcast.
+ *  - `Stop`          → assistant turn ended; user is now needed for the next
+ *                      message. awaiting=1, macNotify, broadcast.
+ *  - `SubagentStop`  → a subagent (Task tool) finished. The parent session is
+ *                      still running, so DO NOT flip awaiting; just acknowledge.
  *
  * Other hook events are accepted but no-op (so registering more hooks is safe).
  */
@@ -34,14 +38,21 @@ export function handleHookEvent(body: any): { ok: boolean; handled: string | nul
     return { ok: true, handled: "Notification" };
   }
 
-  if (event === "Stop" || event === "SubagentStop") {
+  if (event === "Stop") {
     if (sessionId) {
-      stmts.setAwaitingInput.run(0, sessionId);
-      const session = stmts.getSessionById.get(sessionId);
+      stmts.setAwaitingInput.run(1, sessionId);
+      const session = stmts.getSessionById.get(sessionId) as any;
       if (session) publish({ type: "session_updated", session });
-      publish({ type: "awaiting_input", sessionId, awaitingInput: false });
+      publish({ type: "awaiting_input", sessionId, awaitingInput: true });
+      const projectName = session?.project_name;
+      macNotify("Claude Code", projectName ? `${projectName}: turn complete` : "Turn complete");
     }
-    return { ok: true, handled: event };
+    return { ok: true, handled: "Stop" };
+  }
+
+  if (event === "SubagentStop") {
+    // Subagent finished but the parent session is still running. No state change.
+    return { ok: true, handled: "SubagentStop" };
   }
 
   return { ok: true, handled: null };

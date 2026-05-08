@@ -1,23 +1,39 @@
 import { useState } from "react";
-import type { Message } from "../api";
+import type { SessionEvent } from "../api";
 import { shortTime } from "../lib/format";
 
 interface Props {
-  message: Message;
+  event: SessionEvent;
 }
 
-export function MessageView({ message }: Props) {
+const ROLE_FOR_KIND: Record<SessionEvent["kind"], "user" | "assistant" | "system"> = {
+  user_text: "user",
+  user_tool_result: "user",
+  exit: "user",
+  system_meta: "system",
+  permission_mode: "system",
+  ai_title: "system",
+  hook_notification: "system",
+  hook_stop: "system",
+  hook_subagent_stop: "system",
+  assistant_text: "assistant",
+  assistant_thinking: "assistant",
+  assistant_tool_use: "assistant",
+};
+
+export function EventView({ event }: Props) {
   const [open, setOpen] = useState(false);
 
-  const blocks = parseBlocks(message);
+  const role = ROLE_FOR_KIND[event.kind];
+  const blocks = parseBlocks(event);
 
   const roleLabel =
-    message.role === "user" ? "User" : message.role === "assistant" ? "Claude" : "System";
+    role === "user" ? "User" : role === "assistant" ? "Claude" : "System";
 
   const accent =
-    message.role === "user"
+    role === "user"
       ? "border-emerald-500/40"
-      : message.role === "assistant"
+      : role === "assistant"
       ? "border-blue-500/40"
       : "border-zinc-700/60";
 
@@ -26,13 +42,16 @@ export function MessageView({ message }: Props) {
       <div className="flex items-baseline justify-between text-xs text-zinc-500 mb-1">
         <span className="font-medium text-zinc-400">
           {roleLabel}
-          {message.type !== "text" && (
-            <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
-              {message.type}
+          <span className="ml-2 text-[10px] uppercase tracking-wide text-zinc-600">
+            {event.kind.replaceAll("_", " ")}
+          </span>
+          {event.is_sidechain ? (
+            <span className="ml-2 text-[10px] uppercase tracking-wide text-purple-400">
+              sidechain
             </span>
-          )}
+          ) : null}
         </span>
-        <span className="font-mono">{shortTime(message.timestamp)}</span>
+        <span className="font-mono">{shortTime(event.ts)}</span>
       </div>
       <div className="space-y-2">
         {blocks.map((b, i) => (
@@ -47,20 +66,34 @@ type Block =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool_use"; name: string; input: unknown; id: string }
-  | { kind: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+  | { kind: "tool_result"; toolUseId: string; content: string; isError?: boolean }
+  | { kind: "meta"; text: string };
 
-function parseBlocks(m: Message): Block[] {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(m.content);
-  } catch {
-    return [{ kind: "text", text: m.text_preview ?? "" }];
+function parseBlocks(e: SessionEvent): Block[] {
+  // Hook events / meta envelopes — render text_preview directly.
+  if (
+    e.kind === "permission_mode" ||
+    e.kind === "ai_title" ||
+    e.kind === "hook_notification" ||
+    e.kind === "hook_stop" ||
+    e.kind === "hook_subagent_stop" ||
+    e.kind === "exit" ||
+    e.kind === "system_meta"
+  ) {
+    return [{ kind: "meta", text: e.text_preview ?? `(${e.kind})` }];
   }
 
-  // Assistant message: array of blocks.
-  if (m.role === "assistant" && Array.isArray(parsed)) {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(e.raw);
+  } catch {
+    return [{ kind: "text", text: e.text_preview ?? "" }];
+  }
+
+  if (e.kind.startsWith("assistant_")) {
+    const blocks = Array.isArray(parsed?.message?.content) ? parsed.message.content : [];
     const out: Block[] = [];
-    for (const b of parsed) {
+    for (const b of blocks) {
       if (!b || typeof b !== "object") continue;
       if (b.type === "text" && typeof b.text === "string") {
         out.push({ kind: "text", text: b.text });
@@ -73,29 +106,33 @@ function parseBlocks(m: Message): Block[] {
     return out;
   }
 
-  // User message: string or array of tool_results.
-  if (m.role === "user") {
-    if (typeof parsed === "string") return [{ kind: "text", text: parsed }];
-    if (Array.isArray(parsed)) {
-      const out: Block[] = [];
-      for (const b of parsed) {
-        if (!b || typeof b !== "object") continue;
-        if (b.type === "tool_result") {
-          const c = b.content;
-          let text: string;
-          if (typeof c === "string") text = c;
-          else if (Array.isArray(c)) text = c.map((cb: any) => cb?.text ?? "").join("\n");
-          else text = "";
-          out.push({ kind: "tool_result", toolUseId: b.tool_use_id, content: text, isError: !!b.is_error });
-        } else if (b.type === "text" && typeof b.text === "string") {
-          out.push({ kind: "text", text: b.text });
-        }
+  // User
+  const content = parsed?.message?.content;
+  if (typeof content === "string") return [{ kind: "text", text: content }];
+  if (Array.isArray(content)) {
+    const out: Block[] = [];
+    for (const b of content) {
+      if (!b || typeof b !== "object") continue;
+      if (b.type === "tool_result") {
+        const c = b.content;
+        let text: string;
+        if (typeof c === "string") text = c;
+        else if (Array.isArray(c)) text = c.map((cb: any) => cb?.text ?? "").join("\n");
+        else text = "";
+        out.push({
+          kind: "tool_result",
+          toolUseId: b.tool_use_id,
+          content: text,
+          isError: !!b.is_error,
+        });
+      } else if (b.type === "text" && typeof b.text === "string") {
+        out.push({ kind: "text", text: b.text });
       }
-      return out;
     }
+    return out;
   }
 
-  return [{ kind: "text", text: m.text_preview ?? "" }];
+  return [{ kind: "text", text: e.text_preview ?? "" }];
 }
 
 const LONG_TEXT_CHARS = 1200;
@@ -121,9 +158,7 @@ function CollapsibleText({
   open: boolean;
   onToggle: () => void;
 }) {
-  if (!isLong(text)) {
-    return <pre className={className}>{text}</pre>;
-  }
+  if (!isLong(text)) return <pre className={className}>{text}</pre>;
   const preview = open ? text : truncatePreview(text);
   return (
     <div>
@@ -139,7 +174,6 @@ function CollapsibleText({
 }
 
 function truncatePreview(text: string): string {
-  // Cap at LONG_TEXT_LINES lines OR LONG_TEXT_CHARS chars, whichever comes first.
   let lineCount = 0;
   let cutAt = -1;
   for (let i = 0; i < text.length && i < LONG_TEXT_CHARS; i++) {
@@ -155,7 +189,15 @@ function truncatePreview(text: string): string {
   return text.slice(0, cutAt) + "\n…";
 }
 
-function BlockView({ block, open, onToggle }: { block: Block; open: boolean; onToggle: () => void }) {
+function BlockView({
+  block,
+  open,
+  onToggle,
+}: {
+  block: Block;
+  open: boolean;
+  onToggle: () => void;
+}) {
   if (block.kind === "text") {
     return (
       <CollapsibleText
@@ -170,23 +212,22 @@ function BlockView({ block, open, onToggle }: { block: Block; open: boolean; onT
     return (
       <details className="text-sm">
         <summary className="text-zinc-500 italic cursor-pointer select-none">[thinking]</summary>
-        <pre className="whitespace-pre-wrap break-words mt-1 text-zinc-400 font-sans">{block.text}</pre>
+        <pre className="whitespace-pre-wrap break-words mt-1 text-zinc-400 font-sans">
+          {block.text}
+        </pre>
       </details>
     );
   }
   if (block.kind === "tool_use") {
-    const inputStr = (() => {
-      try {
-        return JSON.stringify(block.input, null, 2);
-      } catch {
-        return "";
-      }
-    })();
+    let inputStr = "";
+    try {
+      inputStr = JSON.stringify(block.input, null, 2);
+    } catch {}
     return (
       <details className="text-sm rounded border border-zinc-800 bg-zinc-900/50">
         <summary className="px-2 py-1 cursor-pointer select-none text-zinc-300">
           <span className="text-blue-400 font-mono">▶ {block.name}</span>
-          <span className="text-zinc-600 ml-2 text-xs font-mono">{block.id.slice(0, 14)}</span>
+          <span className="text-zinc-600 ml-2 text-xs font-mono">{block.id?.slice(0, 14)}</span>
         </summary>
         <pre className="px-3 py-2 whitespace-pre-wrap break-words text-xs text-zinc-400 font-mono border-t border-zinc-800/60">
           {inputStr}
@@ -217,6 +258,13 @@ function BlockView({ block, open, onToggle }: { block: Block; open: boolean; onT
           {shown}
         </pre>
       </div>
+    );
+  }
+  if (block.kind === "meta") {
+    return (
+      <pre className="whitespace-pre-wrap break-words text-xs text-zinc-500 italic font-mono bg-zinc-900/30 rounded px-2 py-1">
+        {block.text}
+      </pre>
     );
   }
   return null;

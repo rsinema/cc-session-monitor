@@ -94,6 +94,13 @@ export function ingestFile(filePath: string): {
         if (meta.timestamp > prevLast) sessionLastSeen.set(meta.sessionId, meta.timestamp);
       }
 
+      // ai-title rows often appear without timestamp/cwd, so they don't go through
+      // the meta block above. Stamp the title directly on the session row.
+      if (meta.sessionId && meta.aiTitle) {
+        stmts.setTitle.run(meta.aiTitle, meta.sessionId);
+        touchedSessions.add(meta.sessionId);
+      }
+
       if (!event) continue;
 
       // Ensure the session row exists / metadata is fresh.
@@ -147,10 +154,40 @@ export function ingestFile(filePath: string): {
         stmts.clearAwaitingByToolResult.run(event.sessionId, trId);
       }
 
+      // Assistant `stop_reason: end_turn` is the deterministic signal that the
+      // turn is fully complete and the user is needed next. Catches cases the
+      // Stop hook can't (e.g. server reloading when notify.sh fired).
+      // Gates:
+      //   - isFresh:      only on a newly-ingested message; re-reading old end_turns
+      //                   on boot/migration must not retroactively flag old sessions.
+      //   - !isSidechain: subagent turns complete independently of the parent.
+      //   - !exited_at:   /exit wins; never resurrect an exited session as awaiting.
+      if (
+        isFresh &&
+        event.role === "assistant" &&
+        event.stopReason === "end_turn" &&
+        !event.isSidechain
+      ) {
+        const sess = stmts.getSessionById.get(event.sessionId) as any;
+        if (!sess?.exited_at) {
+          stmts.setAwaitingInput.run(1, event.sessionId);
+        }
+      }
+
       // A new user-typed message implies the user moved on; clear any awaiting state.
       if (event.role === "user" && event.type === "text") {
         stmts.clearAwaitingInputForSession.run(event.sessionId);
+        // `/exit` writes a triplet (caveat / command / goodbye-stdout) all at
+        // the same timestamp. Match the invariant `<command-name>/exit</command-name>`
+        // tag — the goodbye text is randomized.
+        if (event.textPreview?.includes("<command-name>/exit</command-name>")) {
+          stmts.markExited.run(event.timestamp, event.sessionId);
+        }
       }
+      // Any strictly-later real message (assistant turn, tool_result, or a
+      // user message past the exit triplet) means the session resumed —
+      // clear the exited flag.
+      stmts.clearExitedIfBefore.run(event.sessionId, event.timestamp);
       touchedSessions.add(event.sessionId);
     }
 
@@ -164,7 +201,15 @@ export function ingestFile(filePath: string): {
     }
 
     // Persist new offset so we resume from here next time.
-    stmts.setOffset.run(filePath, lines.length);
+    //
+    // We save `lines.length - 1` (the index of the trailing empty string from
+    // split, or the partial last line if the file doesn't end in \n) rather
+    // than `lines.length`. The old "lines.length" semantics caused an off-by-
+    // one where a future ingest would start past the latest real line — when
+    // a new line was appended, the loop would land on the new trailing "" and
+    // skip the actual content. Re-processing the last index each pass is
+    // cheap (INSERT OR IGNORE) and bullet-proof.
+    stmts.setOffset.run(filePath, Math.max(0, lines.length - 1));
   });
 
   tx();

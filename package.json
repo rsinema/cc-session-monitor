@@ -1,16 +1,17 @@
 {
   "name": "claude-session-monitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bun run scripts/dev.ts",
     "server": "bun --watch src/server.ts",
     "web": "vite --config web/vite.config.ts",
-    "backfill": "bun run src/backfill.ts",
+    "ingest": "bun run src/reader/backfill.ts",
     "build": "vite build --config web/vite.config.ts",
     "start": "bun run src/server.ts",
-    "test": "bun test"
+    "test": "bun test src",
+    "publish:image": "bash scripts/publish-image.sh"
   },
   "dependencies": {
     "hono": "^4.6.14",
