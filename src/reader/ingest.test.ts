@@ -145,6 +145,183 @@ describe("ingest — token accumulation", () => {
   });
 });
 
+describe("ingest — tool_use/tool_result ordering (Claude Code occasionally inverts)", () => {
+  test("tool_result line before tool_use line still closes the invocation", () => {
+    // Reproduces the real-world Claude Code bug where the JSONL file has
+    // tool_result on the line that comes BEFORE the matching tool_use.
+    // Without the upsert, completeTool's UPDATE no-ops because the row
+    // doesn't exist yet, and the tool_use later inserts an open row.
+    const ts = "2026-05-08T13:59:24.000Z";
+    appendLine({
+      ...envelope({ timestamp: ts }),
+      type: "user",
+      uuid: nextId(),
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_OUT_OF_ORDER",
+            content: "result body",
+          },
+        ],
+      },
+    });
+    appendLine({
+      ...envelope({ timestamp: ts }),
+      type: "assistant",
+      uuid: nextId(),
+      message: {
+        role: "assistant",
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_OUT_OF_ORDER",
+            name: "Edit",
+            input: { file_path: "/x" },
+          },
+        ],
+      },
+    });
+    ingestFile(sessionFile);
+
+    const tool = db
+      .query("SELECT * FROM tool_invocations WHERE tool_use_id = ?")
+      .get("toolu_OUT_OF_ORDER") as any;
+
+    expect(tool).toBeTruthy();
+    expect(tool.completed_at).not.toBeNull();
+    expect(tool.name).toBe("Edit"); // tool_use's name overwrote the '?' placeholder
+  });
+
+  test("tool_use first then tool_result (normal order) still works", () => {
+    const ts = "2026-05-08T13:59:24.000Z";
+    appendLine({
+      ...envelope({ timestamp: ts }),
+      type: "assistant",
+      uuid: nextId(),
+      message: {
+        role: "assistant",
+        stop_reason: "tool_use",
+        content: [
+          { type: "tool_use", id: "toolu_NORMAL", name: "Read", input: {} },
+        ],
+      },
+    });
+    appendLine({
+      ...envelope({ timestamp: ts }),
+      type: "user",
+      uuid: nextId(),
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_NORMAL", content: "ok" },
+        ],
+      },
+    });
+    ingestFile(sessionFile);
+
+    const tool = db
+      .query("SELECT * FROM tool_invocations WHERE tool_use_id = ?")
+      .get("toolu_NORMAL") as any;
+
+    expect(tool.completed_at).not.toBeNull();
+    expect(tool.name).toBe("Read");
+  });
+});
+
+describe("ingest — last_real_event_ts (noise discrimination)", () => {
+  test("user/assistant/exit events bump last_real_event_ts", () => {
+    const t1 = "2026-05-08T10:00:00.000Z";
+    const t2 = "2026-05-08T10:00:01.000Z";
+    appendLine({
+      ...envelope({ timestamp: t1 }),
+      type: "user",
+      uuid: nextId(),
+      message: { role: "user", content: "hi" },
+    });
+    appendLine({
+      ...envelope({ timestamp: t2 }),
+      type: "assistant",
+      uuid: nextId(),
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "hi back" }],
+      },
+    });
+    ingestFile(sessionFile);
+    const s = getSession();
+    expect(s.last_real_event_ts).toBe(Date.parse(t2));
+    expect(s.last_event_ts).toBe(Date.parse(t2));
+  });
+
+  test("permission_mode does NOT bump last_real_event_ts", () => {
+    const tReal = "2026-05-08T10:00:00.000Z";
+    const tNoise = "2026-05-08T11:00:00.000Z";
+    appendLine({
+      ...envelope({ timestamp: tReal }),
+      type: "user",
+      uuid: nextId(),
+      message: { role: "user", content: "hello" },
+    });
+    appendLine({
+      type: "permission-mode",
+      sessionId: "sess-1",
+      permissionMode: "auto",
+      timestamp: tNoise,
+    });
+    ingestFile(sessionFile);
+    const s = getSession();
+    expect(s.last_real_event_ts).toBe(Date.parse(tReal));
+    // last_event_ts may move forward but real ts stays anchored.
+  });
+
+  test("ai_title does NOT bump last_real_event_ts", () => {
+    const tReal = "2026-05-08T10:00:00.000Z";
+    const tNoise = "2026-05-08T12:00:00.000Z";
+    appendLine({
+      ...envelope({ timestamp: tReal }),
+      type: "user",
+      uuid: nextId(),
+      message: { role: "user", content: "x" },
+    });
+    appendLine({
+      type: "ai-title",
+      sessionId: "sess-1",
+      aiTitle: "A title",
+      timestamp: tNoise,
+    });
+    ingestFile(sessionFile);
+    expect(getSession().last_real_event_ts).toBe(Date.parse(tReal));
+  });
+
+  test("system_meta (goodbye-stdout) does NOT bump last_real_event_ts", () => {
+    const tExit = "2026-05-08T10:00:00.000Z";
+    appendLine({
+      ...envelope({ timestamp: tExit }),
+      type: "user",
+      uuid: nextId(),
+      message: { role: "user", content: "<command-name>/exit</command-name>" },
+    });
+    appendLine({
+      ...envelope({ timestamp: tExit }),
+      type: "user",
+      uuid: nextId(),
+      message: {
+        role: "user",
+        content: "<local-command-stdout>Goodbye!</local-command-stdout>",
+      },
+    });
+    ingestFile(sessionFile);
+    // exit IS real → that ts should be reflected; system_meta after it must
+    // not advance the field further (same ts here so this just verifies
+    // the exit kind was recognized as real).
+    expect(getSession().last_real_event_ts).toBe(Date.parse(tExit));
+  });
+});
+
 describe("ingest — current_permission_mode", () => {
   test("latest permission_mode wins (file order)", () => {
     appendLine({ type: "permission-mode", sessionId: "sess-1", permissionMode: "default" });

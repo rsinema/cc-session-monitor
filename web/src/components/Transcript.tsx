@@ -83,7 +83,7 @@ export function Transcript({ sessionId, onBack }: Props) {
           </div>
           <div className="text-xs text-zinc-500 text-right shrink-0">
             <div>{total} events</div>
-            <div>active {relativeTime(session.last_event_ts)}</div>
+            <div>active {relativeTime(session.last_real_event_ts || session.last_event_ts)}</div>
           </div>
         </div>
       </div>

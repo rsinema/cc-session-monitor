@@ -24,13 +24,21 @@ function loadCollapsed(): Set<string> {
   }
 }
 
+/** Effective "when did something meaningful last happen" — used for both
+ *  ordering and the idle-vs-active heuristic. last_real_event_ts is the
+ *  source of truth; fall back to last_event_ts only for legacy rows that
+ *  predate the column. */
+function effectiveTs(s: Session): number {
+  return s.last_real_event_ts || s.last_event_ts;
+}
+
 function dotClassFor(s: Session): string {
   if (s.state === "AWAITING_USER") {
     return isStaleAwaiting(s) ? "bg-zinc-600" : "bg-yellow-400 awaiting-pulse";
   }
   if (s.state === "EXITED") return "bg-zinc-700";
   // WORKING
-  if (Date.now() - s.last_event_ts > IDLE_AFTER_MS) return "bg-zinc-600";
+  if (Date.now() - effectiveTs(s) > IDLE_AFTER_MS) return "bg-zinc-600";
   return "bg-emerald-400";
 }
 
@@ -53,11 +61,11 @@ export function SessionList({ sessions, selectedId, onSelect }: Props) {
       byProject.set(key, list);
     }
     for (const list of byProject.values()) {
-      list.sort((a, b) => b.last_event_ts - a.last_event_ts);
+      list.sort((a, b) => effectiveTs(b) - effectiveTs(a));
     }
     return Array.from(byProject.entries()).sort((a, b) => {
-      const aLatest = Math.max(...a[1].map((s) => s.last_event_ts));
-      const bLatest = Math.max(...b[1].map((s) => s.last_event_ts));
+      const aLatest = Math.max(...a[1].map(effectiveTs));
+      const bLatest = Math.max(...b[1].map(effectiveTs));
       return bLatest - aLatest;
     });
   }, [sessions]);
@@ -139,7 +147,7 @@ export function SessionList({ sessions, selectedId, onSelect }: Props) {
                         {s.title ? <span className="font-mono text-zinc-600">{s.id.slice(0, 8)} · </span> : null}
                         {s.sub_state ?? s.state.toLowerCase()}
                       </span>
-                      <span>{relativeTime(s.last_event_ts)}</span>
+                      <span>{relativeTime(effectiveTs(s))}</span>
                     </div>
                   </div>
                 </button>

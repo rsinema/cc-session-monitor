@@ -50,7 +50,11 @@ function bucket(s: Session): Bucket["tone"] {
     return isStaleAwaiting(s) ? "idle" : "awaiting";
   }
   // WORKING
-  if (Date.now() - s.last_event_ts > WORKING_IDLE_AFTER_MS) return "idle";
+  // Use last_real_event_ts so envelope noise (permission_mode, system_meta,
+  // hook_*) doesn't reset the idle clock. Catches the "tool_in_flight from
+  // 6 hours ago" case — those tools never returned, no real events landed,
+  // so they correctly bucket as idle even when a stray meta row landed today.
+  if (Date.now() - s.last_real_event_ts > WORKING_IDLE_AFTER_MS) return "idle";
   return "working";
 }
 
@@ -219,7 +223,7 @@ function SessionCard({
             </span>
           )}
         </div>
-        <span className="text-xs text-zinc-500 shrink-0">{relativeTime(session.last_event_ts)}</span>
+        <span className="text-xs text-zinc-500 shrink-0">{relativeTime(session.last_real_event_ts || session.last_event_ts)}</span>
       </div>
       <div className="text-xs text-zinc-600 font-mono truncate mb-1 flex items-center gap-2">
         {showSubtitle && <span className="text-zinc-500">{session.project_name} ·</span>}

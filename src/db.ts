@@ -86,6 +86,11 @@ db.exec(`
     file_path           TEXT NOT NULL,
     started_at          INTEGER NOT NULL,
     last_event_ts       INTEGER NOT NULL,
+    -- Latest ts of a *real* event (user/assistant/exit). Doesn't move on
+    -- noise envelopes (permission_mode, ai_title, system_meta, hook_*).
+    -- This is what the UI sorts and buckets on so dormant sessions don't
+    -- float to the top whenever Claude Code re-emits metadata.
+    last_real_event_ts  INTEGER NOT NULL DEFAULT 0,
     state               TEXT NOT NULL,
     sub_state           TEXT,
     state_since         INTEGER NOT NULL,
@@ -147,6 +152,7 @@ tryExec(`ALTER TABLE sessions ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0`);
 tryExec(`ALTER TABLE sessions ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0`);
 tryExec(`ALTER TABLE sessions ADD COLUMN tokens_cache_read INTEGER NOT NULL DEFAULT 0`);
 tryExec(`ALTER TABLE sessions ADD COLUMN tokens_cache_create INTEGER NOT NULL DEFAULT 0`);
+tryExec(`ALTER TABLE sessions ADD COLUMN last_real_event_ts INTEGER NOT NULL DEFAULT 0`);
 
 export type EventKind =
   | "user_text"
@@ -211,6 +217,7 @@ export interface SessionRow {
   file_path: string;
   started_at: number;
   last_event_ts: number;
+  last_real_event_ts: number;
   state: SessionState;
   sub_state: SessionSubState;
   state_since: number;
@@ -290,10 +297,16 @@ export const stmts = {
     UPDATE sessions SET last_event_ts = MAX(last_event_ts, ?) WHERE id = ?
   `),
 
+  bumpLastRealEventTs: db.prepare(`
+    UPDATE sessions SET last_real_event_ts = MAX(last_real_event_ts, ?) WHERE id = ?
+  `),
+
   getSession: db.prepare(`SELECT * FROM sessions WHERE id = ?`),
 
   listSessions: db.prepare(`
-    SELECT * FROM sessions ORDER BY last_event_ts DESC LIMIT ? OFFSET ?
+    SELECT * FROM sessions
+    ORDER BY MAX(last_real_event_ts, started_at) DESC
+    LIMIT ? OFFSET ?
   `),
 
   getOffset: db.prepare(`SELECT * FROM file_offsets WHERE file_path = ?`),
@@ -310,7 +323,23 @@ export const stmts = {
 
   resetOffset: db.prepare(`DELETE FROM file_offsets WHERE file_path = ?`),
 
-  // Tool invocations
+  // Tool invocations.
+  //
+  // Claude Code's JSONL is not always written in tool_use → tool_result order
+  // (we've observed the result line written before the use line for the same
+  // tool_use_id, by a few KB of file offset). Both INSERT/UPSERT statements
+  // are designed to converge to the same row regardless of arrival order:
+  //
+  //   tool_use first  : upsertToolStart creates a row with completed_at=NULL.
+  //                     Later, completeToolUpsert hits the conflict path and
+  //                     fills in completed_at without disturbing name/started_at.
+  //
+  //   tool_result first: completeToolUpsert inserts a placeholder row with
+  //                     name='?', started_at=ts, completed_at=ts. Later,
+  //                     upsertToolStart hits the conflict path and fills in
+  //                     the real name/session_id/is_sidechain and lowers
+  //                     started_at via MIN(). It deliberately does NOT touch
+  //                     completed_at, so the close stamp is preserved.
   upsertToolStart: db.prepare(`
     INSERT INTO tool_invocations (tool_use_id, session_id, name, started_at, is_sidechain)
     VALUES (?, ?, ?, ?, ?)
@@ -321,10 +350,12 @@ export const stmts = {
       is_sidechain = excluded.is_sidechain
   `),
 
-  completeTool: db.prepare(`
-    UPDATE tool_invocations
-       SET completed_at = ?, is_error = ?
-     WHERE tool_use_id = ?
+  completeToolUpsert: db.prepare(`
+    INSERT INTO tool_invocations (tool_use_id, session_id, name, started_at, completed_at, is_error, is_sidechain)
+    VALUES (?, ?, '?', ?, ?, ?, 0)
+    ON CONFLICT(tool_use_id) DO UPDATE SET
+      completed_at = excluded.completed_at,
+      is_error     = excluded.is_error
   `),
 
   getOpenTools: db.prepare(`

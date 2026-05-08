@@ -124,6 +124,21 @@ export function ingestFile(filePath: string): IngestResult {
       );
       touchedSessions.add(sid);
 
+      // last_real_event_ts only advances on user/assistant/exit — not on noise
+      // envelopes (permission_mode, ai_title, system_meta, hook_*). The UI
+      // sorts and buckets on this so a stale session isn't promoted just
+      // because Claude Code re-emitted a permission_mode row.
+      if (
+        parsed.kind === "user_text" ||
+        parsed.kind === "user_tool_result" ||
+        parsed.kind === "assistant_text" ||
+        parsed.kind === "assistant_thinking" ||
+        parsed.kind === "assistant_tool_use" ||
+        parsed.kind === "exit"
+      ) {
+        stmts.bumpLastRealEventTs.run(parsed.ts, sid);
+      }
+
       // Side-effect rows we project at ingest time (cheap, no projection roundtrip).
       if (parsed.kind === "ai_title" && parsed.aiTitle) {
         stmts.setSessionTitle.run(parsed.aiTitle, sid);
@@ -161,9 +176,14 @@ export function ingestFile(filePath: string): IngestResult {
 
       if (parsed.kind === "user_tool_result") {
         for (const tid of parsed.allToolResultIds) {
-          // is_error not derivable here without re-parsing JSON; leave null
-          // (the v2 UI doesn't depend on it for state, only for display).
-          stmts.completeTool.run(parsed.ts, null, tid);
+          // UPSERT: if the matching tool_use row hasn't been ingested yet
+          // (Claude Code occasionally writes tool_result lines before their
+          // tool_use lines), insert a placeholder so completed_at is captured.
+          // When the tool_use line later arrives, upsertToolStart's
+          // ON CONFLICT path fills in name/started_at and leaves completed_at
+          // intact. is_error stays null — the v2 UI uses it for display, not
+          // for state, so we don't pay the JSON-parse cost here.
+          stmts.completeToolUpsert.run(tid, sid, parsed.ts, parsed.ts, null);
         }
       }
     }

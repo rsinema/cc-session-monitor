@@ -57,20 +57,44 @@ export function useLiveUpdates() {
           if (idx === -1) return [s, ...prev];
           const next = [...prev];
           next[idx] = { ...next[idx], ...s };
-          next.sort((a, b) => b.last_event_ts - a.last_event_ts);
+          next.sort(
+            (a, b) =>
+              (b.last_real_event_ts || b.last_event_ts) -
+              (a.last_real_event_ts || a.last_event_ts)
+          );
           return next;
         });
       } else if (evt.type === "state_changed") {
-        // Browser ping when entering AWAITING_USER and the page is hidden.
-        if (
+        // Ping when a session newly enters AWAITING_USER and the user isn't
+        // looking at this dashboard. We use !document.hasFocus() rather than
+        // document.hidden because the typical workflow is "dashboard tab
+        // visible in a background window, terminal in front" — that's
+        // hidden=false, hasFocus()=false, which is exactly when we want to
+        // ping. document.hidden would suppress the notification.
+        const enteredAwaiting =
           evt.to?.state === "AWAITING_USER" &&
-          document.hidden &&
+          (!evt.from || evt.from.state !== "AWAITING_USER");
+        if (
+          enteredAwaiting &&
+          !document.hasFocus() &&
           "Notification" in window &&
           Notification.permission === "granted"
         ) {
-          new Notification("Claude Code", {
-            body: `${evt.to.sub_state ?? "input needed"}`,
+          // Look up the session for context (project name).
+          const sessions = qc.getQueryData<Session[]>(["sessions"]);
+          const session = sessions?.find((s) => s.id === evt.sessionId);
+          const project = session?.project_name ?? "Claude Code";
+          const sub = (evt.to.sub_state ?? "input needed").replaceAll("_", " ");
+          const n = new Notification(project, {
+            body: sub,
+            // Dedupe: rapid sub_state churn within AWAITING_USER reuses the
+            // existing notification rather than stacking up.
+            tag: `awaiting:${evt.sessionId}`,
           });
+          n.onclick = () => {
+            window.focus();
+            n.close();
+          };
         }
       }
       // tool_started / tool_completed are surfaced via session_meta refresh.

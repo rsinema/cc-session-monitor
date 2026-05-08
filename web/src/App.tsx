@@ -4,6 +4,7 @@ import { api } from "./api";
 import { SessionList } from "./components/SessionList";
 import { Transcript } from "./components/Transcript";
 import { Dashboard, isStaleAwaiting } from "./components/Dashboard";
+import { NotificationToggle } from "./components/NotificationToggle";
 import { SearchBar } from "./components/SearchBar";
 import { SearchResults } from "./components/SearchResults";
 import { useLiveUpdates } from "./hooks/useLiveUpdates";
@@ -22,13 +23,6 @@ export default function App() {
     queryFn: api.listSessions,
     refetchInterval: 30_000,
   });
-
-  // Notification permission, requested once on first load.
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
-  }, []);
 
   // ⌘K / Ctrl+K to focus search.
   useEffect(() => {
@@ -59,7 +53,10 @@ export default function App() {
     <div className="h-full grid grid-cols-[280px_1fr] bg-zinc-950 text-zinc-100">
       {/* Sidebar */}
       <aside className="border-r border-zinc-800 flex flex-col min-h-0">
-        <div className="p-3 border-b border-zinc-800 space-y-2">
+        <div className="px-3 pt-2 pb-1 flex justify-end">
+          <NotificationToggle />
+        </div>
+        <div className="px-3 pb-3 border-b border-zinc-800 space-y-2">
           <button
             onClick={() => setView({ kind: "dashboard" })}
             className={
@@ -88,7 +85,7 @@ export default function App() {
         <div className="flex-1 min-h-0">
           <SessionList sessions={sessions} selectedId={selectedId} onSelect={pickSession} />
         </div>
-        <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-zinc-600 flex justify-between">
+        <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-zinc-600 flex items-center justify-between gap-2">
           <span>{sessions.length} sessions</span>
           <span>v0.2</span>
         </div>

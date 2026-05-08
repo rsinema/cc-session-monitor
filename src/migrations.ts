@@ -18,6 +18,8 @@ export function runMigrations(): MigrationResult[] {
   return [
     backfillUsageColumns(),
     backfillCurrentPermissionMode(),
+    backfillLastRealEventTs(),
+    fixStuckToolInvocations(),
   ];
 }
 
@@ -94,6 +96,90 @@ function backfillUsageColumns(): MigrationResult {
     key: KEY,
     ran: true,
     details: `populated usage on ${touched} assistant events (${skipped} unparseable)`,
+  };
+}
+
+/**
+ * Close tool_invocations that were left open because the matching tool_result
+ * event was ingested before its tool_use (Claude Code's JSONL is occasionally
+ * out of order). For each open row, look for a user_tool_result event in the
+ * same session whose tool_result_id matches; if found, stamp completed_at
+ * with that event's ts. Cheap (indexed on tool_result_id).
+ *
+ * Re-runnable each boot — the WHERE completed_at IS NULL guard keeps it
+ * idempotent without a meta key, and we want it to run after every restart
+ * to catch any new stuck rows from the same out-of-order pattern.
+ */
+function fixStuckToolInvocations(): MigrationResult {
+  const KEY = "fix_stuck_tool_invocations";
+  const before = db
+    .query(
+      `SELECT COUNT(*) AS c FROM tool_invocations WHERE completed_at IS NULL`
+    )
+    .get() as { c: number };
+
+  db.exec(`
+    UPDATE tool_invocations
+       SET completed_at = (
+         SELECT MAX(e.ts) FROM events e
+          WHERE e.session_id = tool_invocations.session_id
+            AND e.tool_result_id = tool_invocations.tool_use_id
+       )
+     WHERE completed_at IS NULL
+       AND EXISTS (
+         SELECT 1 FROM events e
+          WHERE e.session_id = tool_invocations.session_id
+            AND e.tool_result_id = tool_invocations.tool_use_id
+       )
+  `);
+
+  const after = db
+    .query(
+      `SELECT COUNT(*) AS c FROM tool_invocations WHERE completed_at IS NULL`
+    )
+    .get() as { c: number };
+  const closed = before.c - after.c;
+  return {
+    key: KEY,
+    ran: closed > 0,
+    details: closed > 0 ? `closed ${closed} stuck tool_invocations` : undefined,
+  };
+}
+
+/**
+ * For each session, set last_real_event_ts = max(ts) of its real events
+ * (user/assistant/exit). Existing rows had this field defaulting to 0 from
+ * the ALTER TABLE, which would make the dashboard sort dump them to the end.
+ * One-shot scan: cheap (single GROUP BY).
+ */
+function backfillLastRealEventTs(): MigrationResult {
+  const KEY = "last_real_event_ts_backfill_v1";
+  if (isDone(KEY)) return { key: KEY, ran: false };
+
+  const tx = db.transaction(() => {
+    db.exec(`
+      UPDATE sessions
+         SET last_real_event_ts = COALESCE((
+           SELECT MAX(ts) FROM events
+            WHERE events.session_id = sessions.id
+              AND kind IN (
+                'user_text','user_tool_result',
+                'assistant_text','assistant_thinking','assistant_tool_use',
+                'exit'
+              )
+         ), 0)
+    `);
+    markDone(KEY);
+  });
+  tx();
+
+  const populated = db
+    .query(`SELECT COUNT(*) AS c FROM sessions WHERE last_real_event_ts > 0`)
+    .get() as { c: number };
+  return {
+    key: KEY,
+    ran: true,
+    details: `populated last_real_event_ts on ${populated.c} sessions`,
   };
 }
 

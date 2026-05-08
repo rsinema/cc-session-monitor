@@ -30,7 +30,10 @@ export interface Session {
   title: string | null;
   file_path: string;
   started_at: number;
+  /** Most recent ts of any event we ingested for this session, including noise (permission_mode, ai_title, system_meta, hook_*). */
   last_event_ts: number;
+  /** Most recent ts of a "real" event (user/assistant/exit). What the UI should sort and bucket on. */
+  last_real_event_ts: number;
   state: SessionState;
   sub_state: SessionSubState;
   state_since: number;
