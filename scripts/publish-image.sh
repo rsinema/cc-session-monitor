@@ -3,39 +3,23 @@
 # Build the monitor image as a multi-arch (amd64 + arm64) bundle and push it
 # to Docker Hub. Teammates pull from there.
 #
-# Usage:
-#   DOCKER_HUB_USER=yourname ./scripts/publish-image.sh
-# or
-#   ./scripts/publish-image.sh yourname
+# Defaults to docker.io/rsinema/claude-session-monitor — the canonical repo
+# for this project. Override DOCKER_HUB_USER (env or first arg) if you want
+# to push to your own account/fork instead.
 #
 # Optional env vars:
-#   IMAGE_NAME   defaults to claude-session-monitor
-#   PLATFORMS    defaults to linux/amd64,linux/arm64
-#   EXTRA_TAG    additional tag (e.g. v0.3) — pushed alongside latest + SHA
+#   DOCKER_HUB_USER  defaults to rsinema
+#   IMAGE_NAME       defaults to claude-session-monitor
+#   PLATFORMS        defaults to linux/amd64,linux/arm64
+#   EXTRA_TAG        additional tag (e.g. v0.3) — pushed alongside latest + SHA
 
 set -euo pipefail
 
-USER_INPUT="${DOCKER_HUB_USER:-${1:-}}"
+DEFAULT_USER="rsinema"
+USER_INPUT="${DOCKER_HUB_USER:-${1:-$DEFAULT_USER}}"
 IMAGE_NAME="${IMAGE_NAME:-claude-session-monitor}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 EXTRA_TAG="${EXTRA_TAG:-}"
-
-if [[ -z "$USER_INPUT" ]]; then
-  cat >&2 <<'EOF'
-error: Docker Hub username required.
-
-Usage:
-  DOCKER_HUB_USER=yourname bun run publish:image
-or
-  ./scripts/publish-image.sh yourname
-
-Optional env vars:
-  IMAGE_NAME    image name (default: claude-session-monitor)
-  PLATFORMS     buildx target platforms (default: linux/amd64,linux/arm64)
-  EXTRA_TAG     extra version tag, e.g. v0.3
-EOF
-  exit 1
-fi
 
 # ── pre-flight ───────────────────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || {
