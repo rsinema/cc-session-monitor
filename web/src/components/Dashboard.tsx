@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { Session, SessionSubState } from "../api";
 import { SUB_STATE_LABEL } from "../api";
 import { relativeTime } from "../lib/format";
@@ -7,6 +7,15 @@ interface Props {
   sessions: Session[];
   onPick: (id: string) => void;
 }
+
+/**
+ * Idle and exited buckets dwarf the active ones — most of a long-running
+ * monitor's history sits in those two. Cap them by default and let the user
+ * expand. Awaiting and working stay un-truncated; if you have 30+ working
+ * sessions at once you have bigger problems than scroll length.
+ */
+const TRUNCATABLE = new Set<Bucket["tone"]>(["idle", "exited"]);
+const TRUNCATE_AT = 6;
 
 const WORKING_IDLE_AFTER_MS = 10 * 60 * 1000;
 /**
@@ -101,6 +110,17 @@ export function Dashboard({ sessions, onPick }: Props) {
 
   const awaitingCount = buckets[0]!.sessions.length;
 
+  // Per-bucket "show all" toggles. Persisted only in component state — opening
+  // a session and coming back collapses again (deliberate; the long lists are
+  // why we truncate in the first place).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpand = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="px-8 py-6 max-w-6xl mx-auto space-y-8">
@@ -117,8 +137,15 @@ export function Dashboard({ sessions, onPick }: Props) {
           </p>
         </header>
 
-        {buckets.map((b) =>
-          b.sessions.length === 0 ? null : (
+        {buckets.map((b) => {
+          if (b.sessions.length === 0) return null;
+          const truncatable = TRUNCATABLE.has(b.tone);
+          const isExpanded = expanded.has(b.key);
+          const truncated =
+            truncatable && !isExpanded && b.sessions.length > TRUNCATE_AT;
+          const visible = truncated ? b.sessions.slice(0, TRUNCATE_AT) : b.sessions;
+          const hidden = b.sessions.length - visible.length;
+          return (
             <Section
               key={b.key}
               title={b.title}
@@ -127,10 +154,20 @@ export function Dashboard({ sessions, onPick }: Props) {
               }
               tone={b.tone}
             >
-              <CardGrid sessions={b.sessions} onPick={onPick} tone={b.tone} />
+              <CardGrid sessions={visible} onPick={onPick} tone={b.tone} />
+              {truncatable && b.sessions.length > TRUNCATE_AT && (
+                <button
+                  onClick={() => toggleExpand(b.key)}
+                  className="mt-3 text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded border border-zinc-800 hover:border-zinc-600 transition-colors"
+                >
+                  {truncated
+                    ? `Show ${hidden} more ${b.title.toLowerCase()}`
+                    : `Show fewer`}
+                </button>
+              )}
             </Section>
-          )
-        )}
+          );
+        })}
       </div>
     </div>
   );
