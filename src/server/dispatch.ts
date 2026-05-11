@@ -6,6 +6,7 @@ import { stmts, type EventRow, type SessionRow } from "../db.ts";
 import { recomputeState } from "../state/project.ts";
 import { publish } from "./sse.ts";
 import { macNotify } from "./notify.ts";
+import { notifyAwaitingWebhooks } from "./webhooks.ts";
 
 export interface DispatchInput {
   newEvents: EventRow[];
@@ -72,6 +73,7 @@ export function dispatch({ newEvents, touchedSessions }: DispatchInput) {
       if (enteredAwaiting) {
         const sub = recomputed.after.sub_state ?? "input";
         macNotify("Claude Code", `${session.project_name}: ${sub.replaceAll("_", " ")}`);
+        notifyAwaitingWebhooks({ session, subState: sub });
       }
     }
   }
