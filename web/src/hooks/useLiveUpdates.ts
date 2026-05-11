@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { Session, SessionEvent } from "../api";
+import type { ListSessionsResult, Session, SessionEvent } from "../api";
 
 /**
  * Connect once to /api/stream and merge SSE events into the TanStack Query
@@ -51,19 +51,30 @@ export function useLiveUpdates() {
         }
       } else if (evt.type === "session_meta") {
         const s = evt.session as Session;
-        qc.setQueryData<Session[] | undefined>(["sessions"], (prev) => {
-          if (!prev) return prev;
-          const idx = prev.findIndex((x) => x.id === s.id);
-          if (idx === -1) return [s, ...prev];
-          const next = [...prev];
-          next[idx] = { ...next[idx], ...s };
-          next.sort(
-            (a, b) =>
-              (b.last_real_event_ts || b.last_event_ts) -
-              (a.last_real_event_ts || a.last_event_ts)
-          );
-          return next;
-        });
+        // listSessions is keyed by includeArchived now, so walk every matching
+        // cache. A session that just received an event should auto-unarchive
+        // (the server clears archived_at in bumpLastRealEventTs), so we keep
+        // it in the showArchived=false cache too.
+        const caches = qc.getQueryCache().findAll({ queryKey: ["sessions"] });
+        for (const cache of caches) {
+          qc.setQueryData<ListSessionsResult | undefined>(cache.queryKey, (prev) => {
+            if (!prev) return prev;
+            const idx = prev.sessions.findIndex((x) => x.id === s.id);
+            let nextList: Session[];
+            if (idx === -1) {
+              nextList = [s, ...prev.sessions];
+            } else {
+              nextList = [...prev.sessions];
+              nextList[idx] = { ...nextList[idx], ...s };
+            }
+            nextList.sort(
+              (a, b) =>
+                (b.last_real_event_ts || b.last_event_ts) -
+                (a.last_real_event_ts || a.last_event_ts)
+            );
+            return { ...prev, sessions: nextList };
+          });
+        }
       } else if (evt.type === "state_changed") {
         // Ping when a session newly enters AWAITING_USER and the user isn't
         // looking at this dashboard. We use !document.hasFocus() rather than
@@ -80,9 +91,19 @@ export function useLiveUpdates() {
           "Notification" in window &&
           Notification.permission === "granted"
         ) {
-          // Look up the session for context (project name).
-          const sessions = qc.getQueryData<Session[]>(["sessions"]);
-          const session = sessions?.find((s) => s.id === evt.sessionId);
+          // Look up the session for context (project name). Walk every
+          // sessions cache key — the active one might be the showArchived=true
+          // variant depending on the user's toggle state.
+          const caches = qc.getQueryCache().findAll({ queryKey: ["sessions"] });
+          let session: Session | undefined;
+          for (const cache of caches) {
+            const data = qc.getQueryData<ListSessionsResult>(cache.queryKey);
+            const hit = data?.sessions.find((s) => s.id === evt.sessionId);
+            if (hit) {
+              session = hit;
+              break;
+            }
+          }
           const project = session?.project_name ?? "Claude Code";
           const sub = (evt.to.sub_state ?? "input needed").replaceAll("_", " ");
           const n = new Notification(project, {

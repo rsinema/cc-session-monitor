@@ -8,6 +8,7 @@ import { recomputeAllStates } from "./state/project.ts";
 import { runMigrations } from "./migrations.ts";
 import { createApp, attachStaticFrontend } from "./server/api.ts";
 import { dispatch } from "./server/dispatch.ts";
+import { ARCHIVE_AFTER_MS, archiveStaleSessions } from "./archiver.ts";
 
 const PROJECTS_DIR =
   process.env.CC_PROJECTS_DIR ?? join(homedir(), ".claude", "projects");
@@ -56,11 +57,26 @@ for (const m of runMigrations()) {
   if (m.ran) console.log(`[migration] ${m.key}: ${m.details ?? "done"}`);
 }
 const projected = recomputeAllStates();
+const archived = archiveStaleSessions();
 console.log(
-  `[boot] ingested ${bootEvents} new events; projected ${projected} sessions in ${
+  `[boot] ingested ${bootEvents} new events; projected ${projected} sessions; archived ${archived} stale in ${
     Date.now() - bootStart
   }ms`
 );
+
+// Re-run hourly. New events for an archived session auto-unarchive via
+// bumpLastRealEventTs, so the steady state stays accurate without a per-event
+// archive check.
+if (ARCHIVE_AFTER_MS > 0) {
+  setInterval(() => {
+    try {
+      const n = archiveStaleSessions();
+      if (n > 0) console.log(`[archiver] archived ${n} sessions`);
+    } catch (err) {
+      console.error("[archiver] failed:", err);
+    }
+  }, 60 * 60 * 1000).unref();
+}
 
 function ingestAndDispatch(filePath: string) {
   try {

@@ -133,6 +133,24 @@ IMAGE_NAME=session-monitor DOCKER_HUB_USER=yourname bun run publish:image
 PLATFORMS=linux/amd64       DOCKER_HUB_USER=yourname bun run publish:image
 ```
 
+### Configuration
+
+All env vars are optional; reasonable defaults are baked in.
+
+| Env var                  | Default      | What it does                                                                 |
+|--------------------------|--------------|------------------------------------------------------------------------------|
+| `CC_ARCHIVE_AFTER_DAYS`  | `14`         | Auto-hide sessions with no real activity for this many days. `0` disables.   |
+| `SLACK_WEBHOOK_URL`      | unset        | POST a one-line message when a session enters `AWAITING_USER`.               |
+| `DISCORD_WEBHOOK_URL`    | unset        | Same trigger, Discord wire format.                                           |
+| `NTFY_WEBHOOK_URL`       | unset        | Same trigger, [ntfy.sh](https://ntfy.sh) — works for iOS/Android push.       |
+| `MONITOR_PUBLIC_URL`     | unset        | If set, webhook messages include a clickable link back into the dashboard.   |
+| `CC_PROJECTS_DIR`        | `~/.claude/projects` | Override the JSONL source dir.                                       |
+| `CC_MONITOR_DB`          | `~/.claude-monitor/db.sqlite` | Override the SQLite path.                                   |
+
+Archived sessions are still searchable and reachable by URL — they're just
+hidden from the default sidebar. A new event for an archived session
+automatically unarchives it.
+
 ### Caveats vs. running directly
 
 - macOS Notification Center banners are gone — `osascript` doesn't exist in a

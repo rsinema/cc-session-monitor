@@ -29,6 +29,17 @@ services:
     volumes:
       - ${HOME}/.claude:/host/.claude:ro
       - ${HOME}/.claude-monitor:/host/.claude-monitor
+    environment:
+      # Auto-archive sessions with no real activity in this many days. Set to
+      # 0 to disable. Archived sessions stay searchable and reachable by URL.
+      CC_ARCHIVE_AFTER_DAYS: ${CC_ARCHIVE_AFTER_DAYS:-14}
+      # Optional notification fan-out on entered-AWAITING. Leave any unset to
+      # disable that target. Browser notifications still fire regardless.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      NTFY_WEBHOOK_URL: ${NTFY_WEBHOOK_URL:-}
+      # If set, webhook messages include a deep link back into the dashboard.
+      MONITOR_PUBLIC_URL: ${MONITOR_PUBLIC_URL:-}
     # user: "${UID:-1000}:${GID:-1000}"
     restart: unless-stopped
     init: true

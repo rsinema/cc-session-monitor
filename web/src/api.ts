@@ -45,6 +45,8 @@ export interface Session {
   tokens_out: number;
   tokens_cache_read: number;
   tokens_cache_create: number;
+  /** Auto-archived sessions are hidden from the default dashboard. */
+  archived_at: number | null;
 }
 
 export interface SessionEvent {
@@ -90,9 +92,26 @@ async function j<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface ListSessionsResult {
+  sessions: Session[];
+  archivedCount: number;
+}
+
 export const api = {
-  listSessions: async (): Promise<Session[]> =>
-    (await j<{ sessions: Session[] }>(await fetch(`/api/sessions?limit=200`))).sessions,
+  listSessions: async (opts?: { includeArchived?: boolean }): Promise<ListSessionsResult> => {
+    const qs = `?limit=200${opts?.includeArchived ? "&include_archived=true" : ""}`;
+    return j<ListSessionsResult>(await fetch(`/api/sessions${qs}`));
+  },
+
+  archiveSession: async (id: string): Promise<void> => {
+    const res = await fetch(`/api/sessions/${id}/archive`, { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
+  unarchiveSession: async (id: string): Promise<void> => {
+    const res = await fetch(`/api/sessions/${id}/unarchive`, { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
 
   getSession: async (
     id: string,
@@ -120,7 +139,41 @@ export const api = {
 
   search: async (q: string): Promise<SearchResult[]> =>
     (await j<{ results: SearchResult[] }>(await fetch(`/api/search?q=${encodeURIComponent(q)}`))).results,
+
+  getInsights: async (range: InsightsRange): Promise<InsightsResponse> =>
+    j(await fetch(`/api/insights?range=${range}`)),
 };
+
+export type InsightsRange = "24h" | "7d" | "30d" | "all";
+
+export interface InsightsTopTool {
+  name: string;
+  count: number;
+  total_ms: number;
+}
+
+export interface InsightsByProject {
+  project: string;
+  sessions: number;
+  tokens_in: number;
+  tokens_out: number;
+}
+
+export interface InsightsResponse {
+  range: InsightsRange;
+  fromTs: number;
+  toTs: number;
+  sessionCount: number;
+  eventCount: number;
+  tokens: {
+    tokens_in: number;
+    tokens_out: number;
+    tokens_cache_read: number;
+    tokens_cache_create: number;
+  };
+  topTools: InsightsTopTool[];
+  byProject: InsightsByProject[];
+}
 
 /** Tag for a sub_state, used by the UI. Null = no sub-state (EXITED, etc.). */
 export const SUB_STATE_LABEL: Record<NonNullable<SessionSubState>, string> = {

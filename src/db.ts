@@ -153,6 +153,15 @@ tryExec(`ALTER TABLE sessions ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0`)
 tryExec(`ALTER TABLE sessions ADD COLUMN tokens_cache_read INTEGER NOT NULL DEFAULT 0`);
 tryExec(`ALTER TABLE sessions ADD COLUMN tokens_cache_create INTEGER NOT NULL DEFAULT 0`);
 tryExec(`ALTER TABLE sessions ADD COLUMN last_real_event_ts INTEGER NOT NULL DEFAULT 0`);
+tryExec(`ALTER TABLE sessions ADD COLUMN archived_at INTEGER`);
+// Lets listSessions skip archived rows without a full scan once the table grows.
+try {
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at) WHERE archived_at IS NULL`
+  );
+} catch {
+  // older sqlite (no partial index support) — index is an optimization, not required
+}
 
 export type EventKind =
   | "user_text"
@@ -229,6 +238,13 @@ export interface SessionRow {
   tokens_out: number;
   tokens_cache_read: number;
   tokens_cache_create: number;
+  /**
+   * When this session was archived (auto-hidden from the dashboard). NULL =
+   * not archived. Auto-set by the archiver for sessions with no real activity
+   * in CC_ARCHIVE_AFTER_DAYS; auto-cleared on the next real event for that
+   * session.
+   */
+  archived_at: number | null;
 }
 
 export interface ToolInvocationRow {
@@ -297,13 +313,46 @@ export const stmts = {
     UPDATE sessions SET last_event_ts = MAX(last_event_ts, ?) WHERE id = ?
   `),
 
+  // Bumps the "real event" timestamp and clears archived_at in the same step.
+  // A new real event = the session is alive again, so it must come out of the
+  // archive automatically. Combining both writes keeps it atomic and avoids
+  // an extra UPDATE per ingested event.
   bumpLastRealEventTs: db.prepare(`
-    UPDATE sessions SET last_real_event_ts = MAX(last_real_event_ts, ?) WHERE id = ?
+    UPDATE sessions
+       SET last_real_event_ts = MAX(last_real_event_ts, ?),
+           archived_at = NULL
+     WHERE id = ?
+  `),
+
+  countArchived: db.prepare(`
+    SELECT COUNT(*) AS c FROM sessions WHERE archived_at IS NOT NULL
+  `),
+
+  setArchivedAt: db.prepare(`
+    UPDATE sessions SET archived_at = ? WHERE id = ?
+  `),
+
+  // One-shot archiver: stamp archived_at on every session whose last real
+  // event is older than the cutoff and that isn't already archived. Returns
+  // the rowcount so callers can log how many sessions were filed away.
+  archiveStaleSessions: db.prepare(`
+    UPDATE sessions
+       SET archived_at = ?
+     WHERE archived_at IS NULL
+       AND last_real_event_ts > 0
+       AND last_real_event_ts < ?
   `),
 
   getSession: db.prepare(`SELECT * FROM sessions WHERE id = ?`),
 
   listSessions: db.prepare(`
+    SELECT * FROM sessions
+    WHERE archived_at IS NULL
+    ORDER BY MAX(last_real_event_ts, started_at) DESC
+    LIMIT ? OFFSET ?
+  `),
+
+  listSessionsIncludingArchived: db.prepare(`
     SELECT * FROM sessions
     ORDER BY MAX(last_real_event_ts, started_at) DESC
     LIMIT ? OFFSET ?

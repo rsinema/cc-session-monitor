@@ -16,8 +16,26 @@ export function createApp() {
   app.get("/api/sessions", (c) => {
     const limit = Math.min(Number(c.req.query("limit") ?? 200), 500);
     const offset = Number(c.req.query("offset") ?? 0);
-    const sessions = stmts.listSessions.all(limit, offset);
-    return c.json({ sessions });
+    const includeArchived = c.req.query("include_archived") === "true";
+    const sessions = includeArchived
+      ? stmts.listSessionsIncludingArchived.all(limit, offset)
+      : stmts.listSessions.all(limit, offset);
+    const archivedCount = (stmts.countArchived.get() as { c: number }).c;
+    return c.json({ sessions, archivedCount });
+  });
+
+  app.post("/api/sessions/:id/archive", (c) => {
+    const id = c.req.param("id");
+    if (!stmts.getSession.get(id)) return c.json({ error: "not found" }, 404);
+    stmts.setArchivedAt.run(Date.now(), id);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/sessions/:id/unarchive", (c) => {
+    const id = c.req.param("id");
+    if (!stmts.getSession.get(id)) return c.json({ error: "not found" }, 404);
+    stmts.setArchivedAt.run(null, id);
+    return c.json({ ok: true });
   });
 
   app.get("/api/sessions/:id", (c) => {
@@ -66,6 +84,111 @@ export function createApp() {
       )
       .all(id, beforeTs, limit);
     return c.json({ events });
+  });
+
+  app.get("/api/insights", (c) => {
+    const range = (c.req.query("range") ?? "7d").toLowerCase();
+    const now = Date.now();
+    const RANGE_MS: Record<string, number> = {
+      "24h": 24 * 60 * 60 * 1000,
+      "7d": 7 * 24 * 60 * 60 * 1000,
+      "30d": 30 * 24 * 60 * 60 * 1000,
+    };
+    const isAll = range === "all";
+    const fromTs = isAll ? 0 : now - (RANGE_MS[range] ?? RANGE_MS["7d"]!);
+    const toTs = now;
+
+    // Token rollup. Pulled from assistant events because that's where usage
+    // is recorded; sessions.tokens_* is the all-time total, which doesn't
+    // respect the range filter.
+    const tokensRow = db
+      .query(
+        `SELECT
+           COALESCE(SUM(usage_in), 0) AS tokens_in,
+           COALESCE(SUM(usage_out), 0) AS tokens_out,
+           COALESCE(SUM(usage_cache_read), 0) AS tokens_cache_read,
+           COALESCE(SUM(usage_cache_create), 0) AS tokens_cache_create
+         FROM events
+         WHERE kind IN ('assistant_text','assistant_thinking','assistant_tool_use')
+           AND ts >= ? AND ts <= ?`
+      )
+      .get(fromTs, toTs) as {
+      tokens_in: number;
+      tokens_out: number;
+      tokens_cache_read: number;
+      tokens_cache_create: number;
+    };
+
+    // Filter out the '?' placeholder rows that completeToolUpsert inserts
+    // when a tool_result lands before its tool_use; those get their real
+    // name once the tool_use line is ingested, but the GROUP BY shouldn't
+    // surface them in the meantime.
+    const topTools = db
+      .query(
+        `SELECT
+           name,
+           COUNT(*) AS count,
+           COALESCE(SUM(
+             CASE
+               WHEN completed_at IS NOT NULL THEN completed_at - started_at
+               ELSE 0
+             END
+           ), 0) AS total_ms
+         FROM tool_invocations
+         WHERE name != '?'
+           AND started_at >= ? AND started_at <= ?
+         GROUP BY name
+         ORDER BY count DESC
+         LIMIT 15`
+      )
+      .all(fromTs, toTs);
+
+    const sessionCount = (
+      db
+        .query(
+          `SELECT COUNT(DISTINCT session_id) AS c FROM events
+            WHERE ts >= ? AND ts <= ? AND session_id IS NOT NULL`
+        )
+        .get(fromTs, toTs) as { c: number }
+    ).c;
+
+    const eventCount = (
+      db
+        .query(
+          `SELECT COUNT(*) AS c FROM events
+            WHERE ts >= ? AND ts <= ?
+              AND kind IN ('user_text','user_tool_result','assistant_text','assistant_thinking','assistant_tool_use')`
+        )
+        .get(fromTs, toTs) as { c: number }
+    ).c;
+
+    const byProject = db
+      .query(
+        `SELECT
+           s.project_name AS project,
+           COUNT(DISTINCT e.session_id) AS sessions,
+           COALESCE(SUM(e.usage_in), 0) AS tokens_in,
+           COALESCE(SUM(e.usage_out), 0) AS tokens_out
+         FROM events e
+         JOIN sessions s ON s.id = e.session_id
+         WHERE e.ts >= ? AND e.ts <= ?
+           AND e.kind IN ('assistant_text','assistant_thinking','assistant_tool_use')
+         GROUP BY s.project_name
+         ORDER BY (tokens_in + tokens_out) DESC
+         LIMIT 10`
+      )
+      .all(fromTs, toTs);
+
+    return c.json({
+      range: isAll ? "all" : range,
+      fromTs,
+      toTs,
+      sessionCount,
+      eventCount,
+      tokens: tokensRow,
+      topTools,
+      byProject,
+    });
   });
 
   app.get("/api/search", (c) => {
