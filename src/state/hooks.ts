@@ -22,6 +22,23 @@ export interface HookResult {
 
 const HOOK_SYNTH_FILE = "<<hook>>";
 
+/**
+ * Claude Code's Notification hook fires for two unrelated reasons:
+ *   1. Permission ask — body.message = "Claude needs your permission to use <tool>"
+ *   2. Idle timeout (default 60s) or generic "needs your attention"
+ *
+ * Only #1 should park the session in `permission_prompt`. The idle variant
+ * was previously conflated, which flipped completed sessions back to
+ * "Permission" forever (hook ts always beats the user's older reply ts).
+ *
+ * Match the literal phrase "needs your permission" — it's stable across
+ * tool names ("Bash", "Edit", etc.) and unique to the permission path.
+ */
+export function isPermissionMessage(msg: string | null | undefined): boolean {
+  if (typeof msg !== "string") return false;
+  return /needs your permission/i.test(msg);
+}
+
 export function ingestHookEvent(body: any): HookResult {
   if (!body || typeof body !== "object") {
     return { ok: true, handled: null, sessionId: null };
@@ -102,7 +119,15 @@ export function ingestHookEvent(body: any): HookResult {
       usage_cache_create: null,
     };
     if (kind === "hook_notification") {
-      stmts.setHookPermPromptAt.run(ts, sessionId);
+      if (isPermissionMessage(body.message)) {
+        stmts.setHookPermPromptAt.run(ts, sessionId);
+      } else {
+        // Idle / generic-attention notification. Claude isn't blocked on a
+        // permission ask; any previous permission flag is stale by definition
+        // (the assistant clearly continued past it to reach the idle state),
+        // so clear it. This also self-heals stuck sessions over time.
+        stmts.setHookPermPromptAt.run(null, sessionId);
+      }
     }
   });
   tx();

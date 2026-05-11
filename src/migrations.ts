@@ -20,6 +20,7 @@ export function runMigrations(): MigrationResult[] {
     backfillCurrentPermissionMode(),
     backfillLastRealEventTs(),
     fixStuckToolInvocations(),
+    healStaleHookPermPromptAt(),
   ];
 }
 
@@ -180,6 +181,61 @@ function backfillLastRealEventTs(): MigrationResult {
     key: KEY,
     ran: true,
     details: `populated last_real_event_ts on ${populated.c} sessions`,
+  };
+}
+
+/**
+ * Heal sessions stuck on `permission_prompt` because the prior version of
+ * the hook handler treated *every* Notification (including 60s idle pings
+ * and generic "Claude needs your attention" pings) as a permission ask,
+ * which moved hook_perm_prompt_at past the user's most recent reply and
+ * pinned the projection to permission_prompt.
+ *
+ * For each session whose hook_perm_prompt_at points at a Notification event
+ * that was NOT actually a permission ask, clear the flag. recomputeAllStates
+ * runs immediately after migrations on boot and re-projects every session,
+ * so the UI heals without a second restart.
+ *
+ * Re-runnable each boot (idempotent — once cleared, sessions stay clear
+ * unless a new bad notification lands, which the patched hook handler
+ * won't write).
+ */
+function healStaleHookPermPromptAt(): MigrationResult {
+  const KEY = "heal_stale_hook_perm_prompt_at";
+
+  const before = db
+    .query(
+      `SELECT COUNT(*) AS c FROM sessions WHERE hook_perm_prompt_at IS NOT NULL`
+    )
+    .get() as { c: number };
+
+  // Clear hook_perm_prompt_at on sessions where the Notification event that
+  // matches that timestamp is NOT a permission ask (or no such event exists).
+  // text_preview is populated from body.message at ingest time (hooks.ts).
+  db.exec(`
+    UPDATE sessions
+       SET hook_perm_prompt_at = NULL
+     WHERE hook_perm_prompt_at IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM events e
+          WHERE e.session_id = sessions.id
+            AND e.kind = 'hook_notification'
+            AND e.ts = sessions.hook_perm_prompt_at
+            AND e.text_preview LIKE '%needs your permission%'
+       )
+  `);
+
+  const after = db
+    .query(
+      `SELECT COUNT(*) AS c FROM sessions WHERE hook_perm_prompt_at IS NOT NULL`
+    )
+    .get() as { c: number };
+
+  const cleared = before.c - after.c;
+  return {
+    key: KEY,
+    ran: cleared > 0,
+    details: cleared > 0 ? `cleared stale hook_perm_prompt_at on ${cleared} sessions` : undefined,
   };
 }
 

@@ -34,11 +34,11 @@ beforeEach(() => {
 });
 
 describe("ingestHookEvent — schema sanity (18-column insertEvent)", () => {
-  test("Notification hook inserts an event row + sets hook_perm_prompt_at", () => {
+  test("permission Notification sets hook_perm_prompt_at → permission_prompt", () => {
     const r = ingestHookEvent({
       hook_event_name: "Notification",
       session_id: "sess-1",
-      message: "permission needed",
+      message: "Claude needs your permission to use Bash",
     });
     expect(r.ok).toBe(true);
     expect(r.handled).toBe("hook_notification");
@@ -49,6 +49,56 @@ describe("ingestHookEvent — schema sanity (18-column insertEvent)", () => {
     expect(session.hook_perm_prompt_at).toBeGreaterThan(0);
     expect(session.state).toBe("AWAITING_USER");
     expect(session.sub_state).toBe("permission_prompt");
+  });
+
+  test("idle Notification does NOT set hook_perm_prompt_at", () => {
+    const r = ingestHookEvent({
+      hook_event_name: "Notification",
+      session_id: "sess-1",
+      message: "Claude is waiting for your input",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.handled).toBe("hook_notification");
+    const session = stmts.getSession.get("sess-1") as any;
+    expect(session.hook_perm_prompt_at).toBeNull();
+    expect(session.sub_state).not.toBe("permission_prompt");
+  });
+
+  test("generic 'needs your attention' Notification does NOT set hook_perm_prompt_at", () => {
+    ingestHookEvent({
+      hook_event_name: "Notification",
+      session_id: "sess-1",
+      message: "Claude Code needs your attention",
+    });
+    const session = stmts.getSession.get("sess-1") as any;
+    expect(session.hook_perm_prompt_at).toBeNull();
+  });
+
+  test("idle Notification clears a stale hook_perm_prompt_at from an earlier permission ask", () => {
+    // First: a real permission ask parks the session.
+    ingestHookEvent({
+      hook_event_name: "Notification",
+      session_id: "sess-1",
+      message: "Claude needs your permission to use Bash",
+    });
+    let session = stmts.getSession.get("sess-1") as any;
+    expect(session.hook_perm_prompt_at).toBeGreaterThan(0);
+
+    // Idle pings fire 60+ seconds later in real life; in the test we just
+    // need a fresh ts so the synthetic (file_path, byte_offset) doesn't
+    // collide with the first event.
+    Bun.sleepSync(2);
+
+    // Then: an idle ping fires after the user has long since dealt with it.
+    // The idle ping must wipe the stale flag — the assistant clearly got
+    // past the permission to reach idle in the first place.
+    ingestHookEvent({
+      hook_event_name: "Notification",
+      session_id: "sess-1",
+      message: "Claude is waiting for your input",
+    });
+    session = stmts.getSession.get("sess-1") as any;
+    expect(session.hook_perm_prompt_at).toBeNull();
   });
 
   test("Stop hook inserts an event and triggers recompute", () => {

@@ -299,7 +299,7 @@ describe("recomputeState — permission_prompt hook lifecycle", () => {
     ingestHookEvent({
       hook_event_name: "Notification",
       session_id: "sess-1",
-      message: "permission needed",
+      message: "Claude needs your permission to use Bash",
     });
     let r = recomputeState("sess-1");
     expect(r.after.sub_state).toBe("tool_in_flight");
