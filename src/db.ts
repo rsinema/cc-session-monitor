@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const DB_PATH =
@@ -8,11 +8,65 @@ const DB_PATH =
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
-export const db = new Database(DB_PATH, { create: true });
+/**
+ * Open the DB and verify it's not corrupt. macOS Docker's bind-mount
+ * filesystem layer has historically caused SQLite WAL corruption when the
+ * host suspends mid-write (screensaver, sleep). If quick_check fails, we
+ * back the broken files aside with a timestamp and start fresh — the JSONL
+ * source-of-truth gets re-ingested by the boot walkJsonl pass, so no
+ * session history is lost.
+ */
+function openDbWithRecovery(path: string): Database {
+  const handle = new Database(path, { create: true });
+
+  // Fresh DB has no application tables yet; skip the check.
+  const hasTables = !!handle
+    .query(`SELECT name FROM sqlite_master WHERE type='table' AND name='events' LIMIT 1`)
+    .get();
+  if (!hasTables) return handle;
+
+  let healthy = false;
+  try {
+    const row = handle.query(`PRAGMA quick_check(1)`).get() as
+      | { quick_check: string }
+      | undefined;
+    healthy = row?.quick_check === "ok";
+  } catch {
+    healthy = false;
+  }
+  if (healthy) return handle;
+
+  try {
+    handle.close();
+  } catch {
+    // ignore — we're throwing this file away anyway
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      renameSync(path + suffix, `${path}.corrupt-${stamp}${suffix}`);
+    } catch {
+      // missing sidecars (no-WAL state) are fine
+    }
+  }
+  console.error(
+    `[db] integrity check failed; backed up corrupt files to ${path}.corrupt-${stamp}* and starting fresh. boot ingest will rebuild from JSONL.`
+  );
+  return new Database(path, { create: true });
+}
+
+export const db = openDbWithRecovery(DB_PATH);
 
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
-db.exec("PRAGMA synchronous = NORMAL");
+// synchronous=FULL forces an extra fsync per commit; on bind-mounted volumes
+// (macOS Docker / Colima) this is the difference between "host sleep
+// corrupts the DB" and "host sleep loses at most one un-flushed transaction".
+// The perf hit on our tiny per-event commits is invisible in practice.
+db.exec("PRAGMA synchronous = FULL");
+// Cap WAL size so checkpoints run frequently — smaller WAL = smaller window
+// of un-checkpointed pages exposed to filesystem-layer glitches.
+db.exec("PRAGMA wal_autocheckpoint = 200");
 
 // Refuse to run against a v1 database — its `messages` table is incompatible
 // with the v2 `events` schema and silently coexisting would corrupt both.
