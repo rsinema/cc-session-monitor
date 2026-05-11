@@ -87,7 +87,9 @@ export default function App() {
         </div>
         <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-zinc-600 flex items-center justify-between gap-2">
           <span>{sessions.length} sessions</span>
-          <span>v0.2</span>
+          <span title={`commit ${__APP_COMMIT__}`} className="font-mono">
+            v{__APP_VERSION__} · {__APP_COMMIT__}
+          </span>
         </div>
       </aside>
 

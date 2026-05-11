@@ -115,6 +115,7 @@ echo "→ building $REPO for $PLATFORMS"
 echo "  tags: latest, $SHA${EXTRA_TAG:+, $EXTRA_TAG}"
 docker buildx build \
   --platform "$PLATFORMS" \
+  --build-arg APP_COMMIT="$SHA" \
   "${TAGS[@]}" \
   --push \
   .

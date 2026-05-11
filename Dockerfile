@@ -22,6 +22,12 @@ COPY postcss.config.js tailwind.config.js ./
 COPY src ./src
 COPY web ./web
 
+# Short git SHA stamped into the web bundle so the footer shows the same tag
+# that's published to Docker Hub. `.git` isn't COPY'd into the build context,
+# so we accept it as a build-arg from scripts/publish-image.sh.
+ARG APP_COMMIT=dev
+ENV APP_COMMIT=${APP_COMMIT}
+
 RUN bun run build
 
 # ---- runtime stage ------------------------------------------------------
