@@ -390,6 +390,18 @@ export const stmts = {
      LIMIT 1
   `),
 
+  // Latest "real" user-driven event (user_text / user_tool_result / exit).
+  // Used by the projection to decide whether a permission_prompt hook has been
+  // cleared, independently of whatever assistant/meta event happens to be
+  // newest. See state/project.ts Rule 3.
+  getLatestRealUserEvent: db.prepare(`
+    SELECT * FROM events
+     WHERE session_id = ?
+       AND kind IN ('user_text','user_tool_result','exit')
+     ORDER BY ts DESC, id DESC
+     LIMIT 1
+  `),
+
   getEventsForSession: db.prepare(`
     SELECT * FROM events WHERE session_id = ? ORDER BY ts ASC, id ASC
   `),

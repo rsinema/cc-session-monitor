@@ -5,18 +5,7 @@
  * tool_invocations. Pure function of (events, tool_invocations, hook_perm_prompt_at)
  * — no side effects beyond the UPDATE to sessions.
  */
-import { db, stmts, type EventKind, type SessionState, type SessionSubState, type EventRow } from "../db.ts";
-
-/**
- * Event kinds that count as a "real" user-driven event for the projection's
- * "did the user reply / resume after this?" checks. Excludes system_meta
- * (Claude Code's auto-injected goodbye-stdout / caveats) so the /exit triplet
- * doesn't shadow itself, and excludes meta envelopes (permission_mode,
- * ai_title) so they don't masquerade as user activity.
- */
-function isRealUserEvent(kind: EventKind): boolean {
-  return kind === "user_text" || kind === "user_tool_result" || kind === "exit";
-}
+import { db, stmts, type SessionState, type SessionSubState, type EventRow } from "../db.ts";
 
 export interface StateChange {
   sessionId: string;
@@ -31,6 +20,14 @@ interface ProjectionInput {
   sessionId: string;
   latestEvent: EventRow | null;
   latestNonSidechainAssistant: EventRow | null;
+  /**
+   * Latest real user-driven event (user_text / user_tool_result / exit) for the
+   * session, regardless of whether it's also the *overall* latest event. Used
+   * by Rule 3 so the permission_prompt hook gets cleared as soon as the user
+   * replies, even if the assistant has already streamed further events on top
+   * of that reply.
+   */
+  latestRealUserEvent: EventRow | null;
   openTools: { tool_use_id: string; name: string; started_at: number; is_sidechain: number }[];
   hookPermPromptAt: number | null;
   exitedAtEvent: number | null;
@@ -61,6 +58,7 @@ export function project(input: ProjectionInput): Projection {
   const {
     latestEvent,
     latestNonSidechainAssistant,
+    latestRealUserEvent,
     openTools,
     hookPermPromptAt,
     exitedAtEvent,
@@ -127,12 +125,18 @@ export function project(input: ProjectionInput): Projection {
     };
   }
 
-  // Rule 3: hook permission prompt set, not yet cleared by a later real user event
+  // Rule 3: hook permission prompt set, not yet cleared by a later real user event.
+  //
+  // We look at latestRealUserEvent — not latestEvent — because once the user
+  // approves the prompt the assistant immediately streams more events on top
+  // of the user_tool_result that cleared it. If we asked "is the *latest*
+  // event a real user event?", the projection would correctly clear for one
+  // tick and then snap back to permission_prompt as soon as an assistant_text
+  // or assistant_tool_use lands.
   if (hookPermPromptAt != null) {
     const cleared =
-      latestEvent != null &&
-      isRealUserEvent(latestEvent.kind) &&
-      latestEvent.ts >= hookPermPromptAt;
+      latestRealUserEvent != null &&
+      latestRealUserEvent.ts >= hookPermPromptAt;
     if (!cleared) {
       return {
         state: "AWAITING_USER",
@@ -149,12 +153,18 @@ export function project(input: ProjectionInput): Projection {
     latestNonSidechainAssistant &&
     latestNonSidechainAssistant.stop_reason === "end_turn"
   ) {
-    // Make sure no real user reply landed AFTER it.
+    // Make sure no real user reply landed AFTER it. Check latestRealUserEvent
+    // (not latestEvent) for the same reason as Rule 3: a meta envelope landing
+    // after the user reply must not undo our "the user is back" signal.
+    //
+    // Compare by (ts, id) — Claude Code can write several JSONL lines within
+    // the same millisecond, so ts alone is ambiguous. The same lexicographic
+    // ordering is what getLatestEvent uses to pick "the latest" event.
     const userReplyAfter =
-      latestEvent &&
-      latestEvent.id !== latestNonSidechainAssistant.id &&
-      latestEvent.ts >= latestNonSidechainAssistant.ts &&
-      isRealUserEvent(latestEvent.kind);
+      latestRealUserEvent != null &&
+      (latestRealUserEvent.ts > latestNonSidechainAssistant.ts ||
+        (latestRealUserEvent.ts === latestNonSidechainAssistant.ts &&
+          latestRealUserEvent.id > latestNonSidechainAssistant.id));
     if (!userReplyAfter) {
       return {
         state: "AWAITING_USER",
@@ -219,6 +229,9 @@ export function recomputeState(sessionId: string): {
   const latestAsst = stmts.getLatestNonSidechainAssistant.get(sessionId) as
     | EventRow
     | undefined;
+  const latestRealUser = stmts.getLatestRealUserEvent.get(sessionId) as
+    | EventRow
+    | undefined;
   const openTools = stmts.getOpenTools.all(sessionId) as {
     tool_use_id: string;
     name: string;
@@ -257,6 +270,7 @@ export function recomputeState(sessionId: string): {
     sessionId,
     latestEvent: latestEvent ?? null,
     latestNonSidechainAssistant: latestAsst ?? null,
+    latestRealUserEvent: latestRealUser ?? null,
     openTools,
     hookPermPromptAt: session.hook_perm_prompt_at,
     exitedAtEvent,

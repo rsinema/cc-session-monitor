@@ -149,10 +149,12 @@ describe("project — Rule 3 (permission_prompt hook)", () => {
   });
 
   test("hook flag cleared by later user_text", () => {
+    const userReply = ev({ id: 6, ts: 120, kind: "user_text" });
     const p = project({
       sessionId: "s1",
-      latestEvent: ev({ id: 6, ts: 120, kind: "user_text" }),
+      latestEvent: userReply,
       latestNonSidechainAssistant: ev({ id: 5, ts: 100, kind: "assistant_text" }),
+      latestRealUserEvent: userReply,
       openTools: [],
       hookPermPromptAt: 110,
       exitedAtEvent: null,
@@ -163,10 +165,12 @@ describe("project — Rule 3 (permission_prompt hook)", () => {
   });
 
   test("hook flag cleared by later tool_result", () => {
+    const userReply = ev({ id: 6, ts: 120, kind: "user_tool_result" });
     const p = project({
       sessionId: "s1",
-      latestEvent: ev({ id: 6, ts: 120, kind: "user_tool_result" }),
+      latestEvent: userReply,
       latestNonSidechainAssistant: ev({ id: 5, ts: 100, kind: "assistant_text" }),
+      latestRealUserEvent: userReply,
       openTools: [],
       hookPermPromptAt: 110,
       exitedAtEvent: null,
@@ -179,11 +183,38 @@ describe("project — Rule 3 (permission_prompt hook)", () => {
       sessionId: "s1",
       latestEvent: ev({ id: 6, ts: 120, kind: "system_meta" }),
       latestNonSidechainAssistant: ev({ id: 5, ts: 100, kind: "assistant_text" }),
+      latestRealUserEvent: null,
       openTools: [],
       hookPermPromptAt: 110,
       exitedAtEvent: null,
     });
     expect(p.sub_state).toBe("permission_prompt");
+  });
+
+  test("hook stays cleared after assistant streams more events on top of the user reply", () => {
+    // Regression: previously Rule 3 only looked at latestEvent. As soon as the
+    // assistant resumed after permission was granted (assistant_text /
+    // assistant_tool_use), the projection flipped back to permission_prompt
+    // because the *latest* event was no longer a real user event.
+    const userReply = ev({ id: 6, ts: 120, kind: "user_tool_result" });
+    const assistantAfter = ev({
+      id: 7,
+      ts: 130,
+      kind: "assistant_text",
+      stop_reason: "end_turn",
+    });
+    const p = project({
+      sessionId: "s1",
+      latestEvent: assistantAfter,
+      latestNonSidechainAssistant: assistantAfter,
+      latestRealUserEvent: userReply,
+      openTools: [],
+      hookPermPromptAt: 110,
+      exitedAtEvent: null,
+    });
+    expect(p.sub_state).not.toBe("permission_prompt");
+    // With end_turn on the latest assistant, Rule 4 should now take over.
+    expect(p.sub_state).toBe("turn_complete");
   });
 });
 
@@ -206,15 +237,17 @@ describe("project — Rule 4 (end_turn)", () => {
   });
 
   test("end_turn followed by user_text → not turn_complete", () => {
+    const userReply = ev({ id: 6, ts: 110, kind: "user_text" });
     const p = project({
       sessionId: "s1",
-      latestEvent: ev({ id: 6, ts: 110, kind: "user_text" }),
+      latestEvent: userReply,
       latestNonSidechainAssistant: ev({
         id: 5,
         ts: 100,
         kind: "assistant_text",
         stop_reason: "end_turn",
       }),
+      latestRealUserEvent: userReply,
       openTools: [],
       hookPermPromptAt: null,
       exitedAtEvent: null,

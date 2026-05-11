@@ -15,6 +15,7 @@ process.env.CC_MONITOR_DB = DB_FILE;
 const { db } = await import("../db.ts");
 const { ingestFile } = await import("../reader/ingest.ts");
 const { recomputeState } = await import("./project.ts");
+const { ingestHookEvent } = await import("./hooks.ts");
 
 const sessionFile = join(tmp, "session.jsonl");
 
@@ -261,6 +262,75 @@ describe("recomputeState — incremental ingest", () => {
     const b = ingest();
     expect(a.newEvents.length).toBe(1);
     expect(b.newEvents.length).toBe(0);
+  });
+});
+
+describe("recomputeState — permission_prompt hook lifecycle", () => {
+  test("permission_prompt clears after the user approves and the assistant resumes", () => {
+    // Regression for the bug where a session that hit a permission prompt
+    // earlier in the turn was reported as "Permission" even after the user
+    // approved and the assistant finished its reply. Old code only checked
+    // whether *the latest* event was a real user event, which fails as soon
+    // as the assistant streams more text on top of the tool_result.
+    //
+    // Sequence (no longer-open tool by the end):
+    //   user_text → assistant_tool_use → Notification hook fires →
+    //   user_tool_result (tool completes) → assistant_text + end_turn.
+    appendLine({
+      ...envelope(),
+      type: "user",
+      uuid: nextId(),
+      message: { role: "user", content: "do it" },
+    });
+    appendLine({
+      ...envelope(),
+      type: "assistant",
+      uuid: nextId(),
+      message: {
+        role: "assistant",
+        stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: {} }],
+      },
+    });
+    ingest();
+
+    // Claude Code asks for permission while the tool is still open. Rule 2
+    // wins here (tool_in_flight) — the hook flag is parked for later.
+    ingestHookEvent({
+      hook_event_name: "Notification",
+      session_id: "sess-1",
+      message: "permission needed",
+    });
+    let r = recomputeState("sess-1");
+    expect(r.after.sub_state).toBe("tool_in_flight");
+
+    // User approves → tool_result lands → assistant streams text + end_turn.
+    // The latest event is now the assistant message, NOT the tool_result.
+    // Previously this snapped back to permission_prompt; now it should land
+    // on turn_complete.
+    appendLine({
+      ...envelope(),
+      type: "user",
+      uuid: nextId(),
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+      },
+    });
+    appendLine({
+      ...envelope(),
+      type: "assistant",
+      uuid: nextId(),
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "done" }],
+      },
+    });
+    ingest();
+    r = recomputeState("sess-1");
+    expect(r.after.sub_state).not.toBe("permission_prompt");
+    expect(r.after.sub_state).toBe("turn_complete");
   });
 });
 
